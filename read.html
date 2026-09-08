@@ -301,7 +301,7 @@ button{font-family:inherit;}
   <div class="gate-card">
     <p class="gate-mark">Magellica Press</p>
     <h1 id="gateTitle">Reading module</h1>
-    <p class="gate-sub" id="gateSub">Enter your name and the module password to open the reading.</p>
+    <p class="gate-sub" id="gateSub">Enter your name and ID, and the module password, to open the reading.</p>
 
     <div class="field">
       <label for="fName">Your name</label>
@@ -911,9 +911,15 @@ let preloaded = null;
 
 function dressGate(rec){
   $("gateTitle").textContent = rec.title || "Reading module";
-  $("gateSub").textContent   = rec.course
-    ? rec.course + ". Enter your name to open the reading."
-    : "Enter your name to open the reading.";
+
+  /* Name what the student is actually being asked for. The password half is
+     tied to the same value that decides whether the field is shown at all, so
+     the sentence can't promise a box that isn't there. */
+  const asks = rec.password
+    ? "Enter your name and ID, and the module password, to open the reading."
+    : "Enter your name and ID to open the reading.";
+  $("gateSub").textContent = rec.course ? rec.course + ". " + asks : asks;
+
   if (!rec.password) $("fPw").closest(".field").style.display = "none";
 }
 

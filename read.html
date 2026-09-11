@@ -14,6 +14,13 @@
   so there is no browser PDF toolbar, no download button, no print button and
   no "open in new tab" popout to mask.
 
+  WORKSHEET MODE (worksheet: true on the record, set in TeacherRead)
+  Answer lines in the PDF are found automatically and become typing areas.
+  Students get a Print button that prints the pages with what they typed, and
+  their answers are kept in their own browser (localStorage, one entry per
+  module code + student ID). Nothing typed is ever sent to Firestore.
+  Without the switch the module stays screen-only, exactly as before.
+
   URL:  read.html?doc=CH01
 
   FIRESTORE  — collection: documents,  document id = the ?doc= value
@@ -25,6 +32,7 @@
     password:         "orion",                              // required
     copyrightNotice:  "",        // optional, blank = default constant below
     watermark:        true,      // optional, absent = true
+    worksheet:        false,     // optional, absent = false (typing + printing)
     availability: {              // optional, both blank = always open
       start: "2026-09-01T00:00",
       stop:  "2026-12-20T23:59"
@@ -253,6 +261,47 @@ button{font-family:inherit;}
   font-family:var(--serif);font-size:34px;color:#D3CFC5;
 }
 
+/* ------------------------------------------------------------ worksheet -- */
+.rail{overflow-x:auto;scrollbar-width:none;}
+.rail > *:not(.rail-gap){flex:none;}
+.rail .tbtn,.rail .pager{white-space:nowrap;}
+.rail::-webkit-scrollbar{display:none;}
+.ws{display:none;align-items:center;gap:6px;}
+body.worksheet .ws{display:flex;}
+.ws-group{display:flex;align-items:center;gap:6px;}
+.ws-group[hidden]{display:none;}
+.ws-note{font-size:12px;color:var(--muted);white-space:nowrap;margin-right:4px;}
+.ws-note.warn{color:var(--danger);}
+.ws-sep{width:1px;height:20px;background:var(--line);margin:0 6px 0 4px;flex:none;}
+.tbtn.danger{border-color:#5A3438;color:var(--danger);}
+.tbtn.danger:hover{background:#3A2126;}
+@media (max-width:820px){ .ws-note{display:none;} .ws-group .ws-note.ask{display:inline;} }
+
+/* Typing areas laid over the answer lines */
+.anslayer{position:absolute;left:0;top:0;width:100%;pointer-events:none;}
+.ans{
+  position:absolute;
+  pointer-events:auto;
+  background:rgba(74,128,230,.10);
+  border-radius:3px;
+  cursor:text;
+  transition:background .12s ease, box-shadow .12s ease;
+}
+.ans:hover{background:rgba(74,128,230,.15);}
+.ans:focus-within{background:rgba(74,128,230,.16);box-shadow:0 0 0 1.5px rgba(58,110,214,.6);}
+.ans.full{box-shadow:0 0 0 2px rgba(224,115,106,.9);}
+.ans textarea{
+  position:absolute;
+  margin:0;border:0;padding:0;border-radius:0;
+  background:transparent;
+  color:#1C3F94;
+  resize:none;overflow:hidden;outline:none;
+  white-space:pre-wrap;overflow-wrap:break-word;
+  -webkit-user-select:text;user-select:text;
+  -webkit-touch-callout:default;
+}
+#printRoot{display:none;}
+
 /* ---------------------------------------------------------------- foot --- */
 .foot{
   display:flex;align-items:center;justify-content:center;
@@ -285,11 +334,30 @@ button{font-family:inherit;}
 
 /* --------------------------------------------------------------- print --- */
 @media print{
+  @page{margin:0.3in;}
+  html,body{height:auto !important;overflow:visible !important;background:#fff !important;}
   body *{display:none !important;}
   body::after{
     content:"This reading module is licensed for on-screen course use and cannot be printed.";
     display:block !important;
     font:15px/1.6 Georgia, serif;color:#000;padding:60px;
+  }
+  /* Worksheets print only through the toolbar button, which builds the pages
+     first. The browser's own Print menu can't wait for that, so it gets a
+     pointer to the button instead of a blank sheet. */
+  body.worksheet::after{
+    content:"To print this worksheet, use the Print button in the reader\2019s toolbar.";
+  }
+  body.print-ready::after{content:none;display:none !important;}
+  body.print-ready #printRoot{display:block !important;}
+  body.print-ready #printRoot .pp{
+    display:block !important;text-align:center;
+    break-after:page;page-break-after:always;
+  }
+  body.print-ready #printRoot .pp:last-child{break-after:auto;page-break-after:auto;}
+  body.print-ready #printRoot img{
+    display:inline-block !important;
+    width:auto;height:auto;max-width:100%;max-height:10.25in;
   }
 }
 </style>
@@ -328,6 +396,10 @@ button{font-family:inherit;}
       <label for="fFile">Preview a PDF from this computer</label>
       <input id="fFile" type="file" accept="application/pdf"
              style="padding:8px;font-size:13px;color:var(--muted)">
+      <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:var(--type)">
+        <input id="fWork" type="checkbox" style="width:16px;height:16px;accent-color:var(--brass)">
+        Treat it as a worksheet (typing and printing)
+      </label>
     </div>
 
     <button class="gate-btn" id="gateGo">Open reading</button>
@@ -358,6 +430,20 @@ button{font-family:inherit;}
 
     <div class="rail-gap"></div>
 
+    <div class="ws" id="wsBar">
+      <span class="ws-group" id="wsMain">
+        <span class="ws-note" id="wsNote" role="status"></span>
+        <button class="tbtn" id="bClear" title="Erase everything you typed on this reading">Clear answers</button>
+        <button class="tbtn" id="bPrint" title="Print the pages with your answers (Ctrl+P)">Print</button>
+      </span>
+      <span class="ws-group" id="wsAsk" hidden>
+        <span class="ws-note ask">Erase everything you typed on this reading?</span>
+        <button class="tbtn danger" id="wsErase">Erase</button>
+        <button class="tbtn" id="wsKeep">Keep</button>
+      </span>
+      <span class="ws-sep"></span>
+    </div>
+
     <button class="tbtn" id="bOut" title="Zoom out" aria-label="Zoom out">−</button>
     <span class="zoomval" id="bZoom">100%</span>
     <button class="tbtn" id="bIn" title="Zoom in" aria-label="Zoom in">+</button>
@@ -372,6 +458,9 @@ button{font-family:inherit;}
   <div class="foot" id="bFoot"></div>
 </div>
 
+<!-- Filled only while a worksheet is being printed -->
+<div id="printRoot" aria-hidden="true"></div>
+
 <script>
 /* ===========================================================================
    1. CONFIG  —  paste the same firebaseConfig object you use in TeacherVideo.
@@ -379,7 +468,7 @@ button{font-family:inherit;}
    set in TeacherRead_v1_0.html on your desktop.
    =========================================================================== */
 const firebaseConfig = {
-  apiKey:            "AIzaSyApEcj1Gt_AgK9853JGWsyPuWuX1RyRQQA",
+  apiKey:            "AIzaSyApECjlGt_AgK9853JGWsyPuWuXIRyRQOA",
   authDomain:        "astronomy-course.firebaseapp.com",
   projectId:         "astronomy-course",
   storageBucket:     "astronomy-course.firebasestorage.app",
@@ -417,6 +506,21 @@ let watermarkText = "";
 let copyrightLine = "";
 let observer = null;
 let localPdf = null;       // {name, data} when previewing a file from disk
+let layoutWidth = 0;       // scroll width the current layout was built for
+
+/* Worksheet mode — typing on answer lines, printing, answers kept locally */
+let worksheet  = false;
+let answers    = {};       // "page.space" -> text, e.g. "3.2"
+let answerKey  = "";       // localStorage key: module code + student ID
+let canStore   = true;
+let blockCache = {};       // page number -> Promise of answer spaces
+let saveTick   = null;
+let noteTick   = null;
+let printing   = false;
+let printUrls  = [];
+const PRINT_SCALE = 2.5;   // 180 dpi on paper
+const ANS_FONT = '"Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+const ANS_INK  = "#1C3F94";
 
 /* Viewing record (not a grade) */
 const VIEWS      = "readingViews";
@@ -485,6 +589,10 @@ async function openReading(){
       (record.course ? `  \u00B7  ${record.course}` : "") +
       `  \u00B7  Not for redistribution`;
 
+    worksheet = record.worksheet === true;
+    document.body.classList.toggle("worksheet", worksheet);
+    if (worksheet) startAnswers(sid);
+
     $("bTitle").textContent = record.title || "Reading module";
     $("bWho").textContent   = [record.course, name, sid].filter(Boolean).join("  \u00B7  ");
     $("bFoot").textContent  = copyrightLine;
@@ -524,7 +632,8 @@ async function resolveModule(){
   if (localPdf) return {
     title:   localPdf.name.replace(/\.pdf$/i, ""),
     course:  "Local preview",
-    pdfData: localPdf.data
+    pdfData: localPdf.data,
+    worksheet: $("fWork").checked
   };
 
   if (preloaded) return preloaded;
@@ -581,6 +690,7 @@ async function loadPdf(src){
     Object.assign({ isEvalSupported:false }, src)
   ).promise;
   $("bTot").textContent = pdfDoc.numPages;
+  blockCache = {};
 
   baseSizes = [];
   for (let n = 1; n <= pdfDoc.numPages; n++){
@@ -601,6 +711,7 @@ function layout(){
   renderTasks = [];
   if (observer) observer.disconnect();
 
+  layoutWidth = $("scroll").clientWidth;
   if (fitWidth) scale = fitScale();
   $("bZoom").textContent = Math.round(scale * 100) + "%";
   syncZoomButtons();
@@ -654,6 +765,7 @@ async function renderPage(n){
     box.innerHTML = "";
     box.appendChild(canvas);
     await addLinkLayer(box, page, n);
+    if (worksheet) await addAnswerLayer(box, n);
     box.classList.remove("pending");
     box.dataset.done = "1";
   } catch (err){
@@ -665,24 +777,24 @@ async function renderPage(n){
 
 /* The band sits BELOW the rendered page, so nothing in the reading is ever
    covered — the same convention a licensed publisher copy uses. */
-function stampFooter(ctx, w, pageH, totalH){
+function stampFooter(ctx, w, pageH, totalH, k = DPR){
   const h  = totalH - pageH;
-  const fs = Math.max(8.5 * DPR, Math.min(11 * DPR, w * 0.0105));
+  const fs = Math.max(8.5 * k, Math.min(11 * k, w * 0.0105));
 
   ctx.save();
   ctx.fillStyle = "#F1EEE8";
   ctx.fillRect(0, pageH, w, h);
   ctx.fillStyle = "#DAD5CA";
-  ctx.fillRect(0, pageH, w, Math.max(1, DPR));
+  ctx.fillRect(0, pageH, w, Math.max(1, k));
 
   ctx.font = fs + "px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
   ctx.textBaseline = "middle";
   ctx.textAlign = "center";
 
   ctx.fillStyle = "#5C5648";
-  ctx.fillText(copyrightLine, w / 2, pageH + h * 0.34, w - 24 * DPR);
+  ctx.fillText(copyrightLine, w / 2, pageH + h * 0.34, w - 24 * k);
   ctx.fillStyle = "#8A8478";
-  ctx.fillText(watermarkText, w / 2, pageH + h * 0.70, w - 24 * DPR);
+  ctx.fillText(watermarkText, w / 2, pageH + h * 0.70, w - 24 * k);
   ctx.restore();
 }
 
@@ -880,6 +992,9 @@ $("scroll").addEventListener("scroll", () => {
 let resizeTick = null;
 window.addEventListener("resize", () => {
   if (!pdfDoc || !fitWidth) return;
+  /* A phone's on-screen keyboard fires resize without changing the width.
+     Rebuilding then would throw away the box the student is typing in. */
+  if (Math.abs($("scroll").clientWidth - layoutWidth) < 2) return;
   clearTimeout(resizeTick);
   resizeTick = setTimeout(() => { const k = currentPage(); layout(); goToPage(k); }, 200);
 });
@@ -897,11 +1012,465 @@ document.addEventListener("keydown", e => {
 /* Speed bumps, not DRM — same posture as the video masking.
    Links are exempt so "open in new tab" still works on them. */
 $("pages").addEventListener("contextmenu", e => {
-  if (!e.target.closest(".pdflink")) e.preventDefault();
+  if (!e.target.closest(".pdflink, .ans")) e.preventDefault();
 });
 $("pages").addEventListener("dragstart", e => {
-  if (!e.target.closest(".pdflink")) e.preventDefault();
+  if (!e.target.closest(".pdflink, .ans")) e.preventDefault();
 });
+
+/* ===========================================================================
+   5b. WORKSHEET MODE
+   Only runs when the module record has worksheet: true. Answer lines are
+   found in the PDF itself, so a review sheet needs no form fields and no
+   special export — draw lines in Writer and they become typing space.
+   =========================================================================== */
+
+/* ---- finding the answer lines ---------------------------------------------
+   A line counts when it is a long, thin horizontal stroke (or a hairline
+   filled rectangle, which is how Word draws them) with clear space above it.
+   The clear-space rule is what keeps a heading's underline out: its text sits
+   right on top of it, while an answer line has a writing row of empty paper.
+   Lines stacked at an even spacing with nothing printed between them become
+   one answer space, so typing wraps from line to line like handwriting.
+   Everything here is in page points, y measured down from the top.          */
+function getBlocks(n){
+  if (!blockCache[n]){
+    blockCache[n] = pdfDoc.getPage(n).then(findAnswerLines).catch(e => {
+      console.warn("answer lines, page " + n, e);
+      return [];
+    });
+  }
+  return blockCache[n];
+}
+
+async function findAnswerLines(page){
+  const vp     = page.getViewport({ scale: 1 });
+  const O      = pdfjsLib.OPS;
+  const minLen = Math.max(100, vp.width * 0.22);
+  const ol     = await page.getOperatorList();
+
+  const mul = (m, t) => [
+    m[0]*t[0] + m[2]*t[1],        m[1]*t[0] + m[3]*t[1],
+    m[0]*t[2] + m[2]*t[3],        m[1]*t[2] + m[3]*t[3],
+    m[0]*t[4] + m[2]*t[5] + m[4], m[1]*t[4] + m[3]*t[5] + m[5]
+  ];
+  const at = (m, x, y) =>
+    vp.convertToViewportPoint(m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5]);
+
+  const STROKE = new Set([O.stroke, O.closeStroke, O.fillStroke, O.eoFillStroke,
+                          O.closeFillStroke, O.closeEOFillStroke]);
+  const FILL   = new Set([O.fill, O.eoFill]);
+
+  let ctm = [1, 0, 0, 1, 0, 0];
+  const stack = [];
+  let pending = [];
+  const found = [];
+
+  function collect(ops, c){
+    let j = 0, cx = 0, cy = 0;
+    for (const op of ops){
+      if (op === O.moveTo){ cx = c[j++]; cy = c[j++]; }
+      else if (op === O.lineTo){
+        const x = c[j++], y = c[j++];
+        const p = at(ctm, cx, cy), q = at(ctm, x, y);
+        if (Math.abs(p[1] - q[1]) < 0.75 && Math.abs(p[0] - q[0]) >= minLen)
+          pending.push({ kind: "seg", x0: Math.min(p[0], q[0]), x1: Math.max(p[0], q[0]),
+                         y: (p[1] + q[1]) / 2, h: 0 });
+        cx = x; cy = y;
+      }
+      else if (op === O.curveTo){ j += 4; cx = c[j++]; cy = c[j++]; }
+      else if (op === O.curveTo2 || op === O.curveTo3){ j += 2; cx = c[j++]; cy = c[j++]; }
+      else if (op === O.rectangle){
+        const x = c[j++], y = c[j++], w = c[j++], h = c[j++];
+        const pts = [at(ctm, x, y), at(ctm, x + w, y), at(ctm, x + w, y + h), at(ctm, x, y + h)];
+        const xs = pts.map(v => v[0]), ys = pts.map(v => v[1]);
+        const x0 = Math.min(...xs), x1 = Math.max(...xs);
+        const y0 = Math.min(...ys), y1 = Math.max(...ys);
+        if (x1 - x0 >= minLen && y1 - y0 <= 3)
+          pending.push({ kind: "rect", x0, x1, y: (y0 + y1) / 2, h: y1 - y0 });
+        cx = x; cy = y;
+      }
+    }
+  }
+
+  for (let i = 0; i < ol.fnArray.length; i++){
+    const fn = ol.fnArray[i], a = ol.argsArray[i];
+    if      (fn === O.save)                  stack.push(ctm);
+    else if (fn === O.restore)               { if (stack.length) ctm = stack.pop(); }
+    else if (fn === O.transform)             ctm = mul(ctm, a);
+    else if (fn === O.paintFormXObjectBegin) { stack.push(ctm); if (a && a[0]) ctm = mul(ctm, a[0]); }
+    else if (fn === O.paintFormXObjectEnd)   { if (stack.length) ctm = stack.pop(); }
+    else if (fn === O.beginGroup)            { stack.push(ctm); if (a && a[0] && a[0].matrix) ctm = mul(ctm, a[0].matrix); }
+    else if (fn === O.endGroup)              { if (stack.length) ctm = stack.pop(); }
+    else if (fn === O.constructPath)         collect(a[0], a[1]);
+    else if (STROKE.has(fn))                 { found.push(...pending); pending = []; }
+    else if (FILL.has(fn))                   { found.push(...pending.filter(v => v.kind === "rect")); pending = []; }
+    else if (fn === O.endPath)               pending = [];
+  }
+
+  /* The same rule drawn twice (common in Writer exports) is one rule */
+  found.sort((p, q) => p.y - q.y || p.x0 - q.x0);
+  const rules = [];
+  for (const r of found){
+    const twin = rules.find(u => Math.abs(u.y - r.y) < 1 && Math.abs(u.x0 - r.x0) < 2 && Math.abs(u.x1 - r.x1) < 2);
+    if (!twin) rules.push(r);
+  }
+  if (!rules.length) return [];
+
+  /* Printed words, by baseline */
+  const tc = await page.getTextContent();
+  const words = [];
+  for (const it of tc.items){
+    if (!it.str || !it.str.trim()) continue;
+    const t = it.transform;
+    const p = vp.convertToViewportPoint(t[4], t[5]);
+    const q = vp.convertToViewportPoint(t[4] + (it.width || 0), t[5]);
+    words.push({ x0: Math.min(p[0], q[0]), x1: Math.max(p[0], q[0]), y: p[1] });
+  }
+
+  const overlaps = (u, v) => u.x0 < v.x1 - 1 && v.x0 < u.x1 - 1;
+
+  for (const r of rules){
+    let clear = r.y;
+    for (const w of words) if (w.y < r.y - 0.5 && overlaps(w, r)) clear = Math.min(clear, r.y - w.y);
+    for (const o of rules) if (o !== r && o.y < r.y - 0.5 && overlaps(o, r)) clear = Math.min(clear, r.y - o.y);
+    r.clear = clear;
+  }
+
+  const blocks = [];
+  for (const r of rules.filter(v => v.clear >= 14)){
+    const home = blocks.slice().reverse().find(b => {
+      const last = b.ys[b.ys.length - 1];
+      const gap  = r.y - last;
+      return Math.abs(r.x0 - b.x0) <= 4 && Math.abs(r.x1 - b.x1) <= 4
+          && gap >= 12 && gap <= 40
+          && (b.ys.length < 2 || Math.abs(gap - b.step) <= 3)
+          && !words.some(w => w.y > last + 0.5 && w.y < r.y - 0.5 && overlaps(w, r));
+    });
+    if (home){
+      home.ys.push(r.y);
+      home.step = (r.y - home.ys[0]) / (home.ys.length - 1);
+    } else {
+      blocks.push({ x0: r.x0, x1: r.x1, ys: [r.y], step: 0, clear: r.clear });
+    }
+  }
+
+  blocks.sort((p, q) => p.ys[0] - q.ys[0] || p.x0 - q.x0);
+  for (const b of blocks){
+    b.L   = b.ys.length > 1 ? b.step : Math.min(b.clear, 26);   // one writing row
+    b.top = b.ys[0] - Math.max(6, Math.min(b.L - 2, b.clear - 4));
+  }
+  return blocks;
+}
+
+/* ---- type geometry --------------------------------------------------------
+   Typed text sits on the line the way handwriting does. The textarea's rows
+   are exactly one line spacing tall, and its top is shifted so each row's
+   baseline lands just above its rule. s = pixels per page point.            */
+const metricCtx = document.createElement("canvas").getContext("2d");
+function fontMetrics(px){
+  metricCtx.font = px + "px " + ANS_FONT;
+  const m = metricCtx.measureText("Hg");
+  const A = m.fontBoundingBoxAscent, D = m.fontBoundingBoxDescent;
+  return (A > 0 && D > 0) ? { A, D } : { A: px * 0.93, D: px * 0.24 };
+}
+function answerType(b, s, shrink){
+  const L = b.L * s;
+  const F = Math.max(8, Math.min(13, b.L * 0.5)) * s * shrink;
+  const { A, D } = fontMetrics(F);
+  return { L, F, A, D, g: D * 0.8 + 0.6 * s };
+}
+function placeTextarea(ta, b, s, boxTop, shrink){
+  const t = answerType(b, s, shrink);
+  const firstRowTop = b.ys[0] * s - t.g - t.L / 2 - (t.A - t.D) / 2;
+  ta.style.left       = 4 * s + "px";
+  ta.style.width      = (b.x1 - b.x0 - 4) * s + "px";
+  ta.style.top        = (firstRowTop - boxTop) + "px";
+  ta.style.height     = b.ys.length * t.L + "px";
+  ta.style.fontFamily = ANS_FONT;
+  ta.style.fontSize   = t.F + "px";
+  ta.style.lineHeight = t.L + "px";
+}
+const overfull = ta => ta.scrollHeight > ta.clientHeight + 1;
+
+/* ---- the typing layer ----------------------------------------------------- */
+async function addAnswerLayer(box, n){
+  const blocks = await getBlocks(n);
+  if (!blocks.length || !box.isConnected) return;
+
+  const s = scale;
+  const layer = document.createElement("div");
+  layer.className = "anslayer";
+  layer.style.height = Math.round(baseSizes[n - 1].h * s) + "px";
+  box.appendChild(layer);
+
+  blocks.forEach((b, k) => {
+    const key  = n + "." + (k + 1);
+    const pad  = 2 * s;
+    const top  = b.top * s;
+    const wrap = document.createElement("div");
+    wrap.className = "ans";
+    wrap.style.cssText =
+      `left:${b.x0 * s - pad}px;top:${top}px;` +
+      `width:${(b.x1 - b.x0) * s + 2 * pad}px;` +
+      `height:${b.ys[b.ys.length - 1] * s + 2 - top}px;`;
+
+    const ta = document.createElement("textarea");
+    ta.spellcheck = true;
+    ta.setAttribute("autocomplete", "off");
+    ta.setAttribute("aria-label",
+      "Answer space " + (k + 1) + " on page " + n + ", " + b.ys.length +
+      (b.ys.length === 1 ? " line" : " lines"));
+    ta.value = answers[key] || "";
+    wrap.appendChild(ta);
+    layer.appendChild(wrap);
+
+    /* Existing text that no longer fits (a different zoom can change where
+       words wrap) gets slightly smaller type rather than a hidden last line */
+    let shrink = 1;
+    placeTextarea(ta, b, s, top, shrink);
+    while (ta.value && overfull(ta) && shrink > 0.7){
+      shrink *= 0.92;
+      placeTextarea(ta, b, s, top, shrink);
+    }
+
+    let before = { value: ta.value, start: 0, end: 0 };
+    ta.addEventListener("beforeinput", () => {
+      before = { value: ta.value, start: ta.selectionStart, end: ta.selectionEnd };
+    });
+
+    /* Paper has only so many lines. Typing past the last one is refused,
+       and the space flashes, instead of scrolling words out of sight. */
+    ta.addEventListener("input", () => {
+      if (overfull(ta)){
+        ta.value = before.value;
+        ta.setSelectionRange(before.start, before.end);
+        wrap.classList.remove("full"); void wrap.offsetWidth; wrap.classList.add("full");
+        clearTimeout(wrap._flash);
+        wrap._flash = setTimeout(() => wrap.classList.remove("full"), 700);
+        flashNote("No more room on those lines", true);
+        return;
+      }
+      if (ta.value) answers[key] = ta.value; else delete answers[key];
+      queueSave();
+    });
+
+    wrap.addEventListener("mousedown", e => {
+      if (e.target !== wrap) return;
+      e.preventDefault();
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    });
+  });
+}
+
+/* ---- keeping answers in this browser -------------------------------------- */
+function setNote(text, warn){
+  const el = $("wsNote");
+  el.textContent = text;
+  el.classList.toggle("warn", !!warn);
+}
+function restingNote(){
+  setNote(canStore ? "Answers save in this browser"
+                   : "This browser can\u2019t save answers \u2014 print before you close",
+          !canStore);
+}
+function flashNote(text, warn){
+  setNote(text, warn);
+  clearTimeout(noteTick);
+  noteTick = setTimeout(restingNote, 2200);
+}
+
+function startAnswers(sid){
+  answerKey = "readAnswers:" + (localPdf ? "preview:" + localPdf.name : docId) + ":" + sid;
+  answers = {};
+  try {
+    const raw = localStorage.getItem(answerKey);
+    if (raw){
+      const saved = JSON.parse(raw);
+      if (saved && saved.answers && typeof saved.answers === "object") answers = saved.answers;
+    }
+    localStorage.setItem("readAnswers:probe", "1");
+    localStorage.removeItem("readAnswers:probe");
+    canStore = true;
+  } catch (e){
+    canStore = false;
+  }
+  restingNote();
+}
+
+function queueSave(){
+  clearTimeout(saveTick);
+  saveTick = setTimeout(saveAnswers, 500);
+}
+function saveAnswers(){
+  clearTimeout(saveTick);
+  saveTick = null;
+  if (!worksheet || !answerKey || !canStore) return;
+  try {
+    if (Object.keys(answers).length){
+      localStorage.setItem(answerKey, JSON.stringify({
+        title: (record && record.title) || "",
+        saved: new Date().toISOString(),
+        answers
+      }));
+    } else {
+      localStorage.removeItem(answerKey);
+    }
+  } catch (e){
+    setNote("Couldn\u2019t save \u2014 print before you close", true);
+  }
+}
+window.addEventListener("pagehide", saveAnswers);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") saveAnswers();
+});
+
+/* ---- clear ----------------------------------------------------------------- */
+function askClear(on){
+  $("wsMain").hidden = on;
+  $("wsAsk").hidden  = !on;
+  (on ? $("wsKeep") : $("bClear")).focus();
+}
+$("bClear").addEventListener("click", () => askClear(true));
+$("wsKeep").addEventListener("click", () => askClear(false));
+$("wsErase").addEventListener("click", () => {
+  answers = {};
+  document.querySelectorAll(".ans textarea").forEach(t => { t.value = ""; });
+  saveAnswers();
+  askClear(false);
+  flashNote("Answers cleared");
+});
+
+/* ---- printing ---------------------------------------------------------------
+   Each page is drawn fresh at print resolution with the typed answers painted
+   onto it, then handed to the browser as one image per sheet. What prints is
+   exactly the page, the answers and the footer stamp — never the toolbar.   */
+function wrapText(ctx, text, width){
+  const out = [];
+  for (const para of String(text).split("\n")){
+    const tokens = para.match(/\S+|\s+/g) || [];
+    let line = "";
+    for (const tok of tokens){
+      if (/^\s/.test(tok)){ line += tok; continue; }
+      if (ctx.measureText(line + tok).width <= width){ line += tok; continue; }
+      if (line.trim()) out.push(line.replace(/\s+$/, ""));
+      line = "";
+      if (ctx.measureText(tok).width <= width){ line = tok; continue; }
+      let piece = "";
+      for (const ch of tok){
+        if (piece && ctx.measureText(piece + ch).width > width){ out.push(piece); piece = ch; }
+        else piece += ch;
+      }
+      line = piece;
+    }
+    out.push(line.replace(/\s+$/, ""));
+  }
+  return out;
+}
+
+function drawAnswers(ctx, blocks, n, S){
+  blocks.forEach((b, k) => {
+    const text = answers[n + "." + (k + 1)];
+    if (!text) return;
+    const rows  = b.ys.length;
+    const width = (b.x1 - b.x0 - 4) * S;
+    let shrink = 1, t, lines;
+    for (;;){
+      t = answerType(b, S, shrink);
+      ctx.font = t.F + "px " + ANS_FONT;
+      lines = wrapText(ctx, text, width);
+      if (lines.length <= rows || shrink <= 0.7) break;
+      shrink *= 0.92;
+    }
+    ctx.save();
+    ctx.fillStyle = ANS_INK;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+    lines.slice(0, rows).forEach((ln, r) =>
+      ctx.fillText(ln, (b.x0 + 2) * S, b.ys[r] * S - t.g));
+    ctx.restore();
+  });
+}
+
+function clearPrint(){
+  document.body.classList.remove("print-ready");
+  $("printRoot").innerHTML = "";
+  printUrls.forEach(u => URL.revokeObjectURL(u));
+  printUrls = [];
+}
+window.addEventListener("afterprint", () => setTimeout(clearPrint, 0));
+
+async function printReading(){
+  if (!worksheet || !pdfDoc || printing) return;
+  printing = true;
+  saveAnswers();
+  clearPrint();
+
+  const btn  = $("bPrint");
+  const root = $("printRoot");
+  const S    = PRINT_SCALE;
+  btn.disabled = true;
+
+  try {
+    for (let n = 1; n <= pdfDoc.numPages; n++){
+      btn.textContent = "Preparing " + n + " of " + pdfDoc.numPages;
+      const page  = await pdfDoc.getPage(n);
+      const vp    = page.getViewport({ scale: S });
+      const pageH = Math.round(vp.height);
+      const band  = record.watermark !== false ? Math.round(BAND * S) : 0;
+
+      const canvas = document.createElement("canvas");
+      canvas.width  = Math.round(vp.width);
+      canvas.height = pageH + band;
+      const ctx = canvas.getContext("2d", { alpha: false });
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      if (band) stampFooter(ctx, canvas.width, pageH, canvas.height, S);
+      drawAnswers(ctx, await getBlocks(n), n, S);
+
+      const blob = await new Promise((ok, no) =>
+        canvas.toBlob(b => b ? ok(b) : no(new Error("page " + n + " image failed")), "image/png"));
+      canvas.width = canvas.height = 0;
+
+      const url = URL.createObjectURL(blob);
+      printUrls.push(url);
+      const sheet = document.createElement("div");
+      sheet.className = "pp";
+      const img = new Image();
+      img.alt = "";
+      img.src = url;
+      sheet.appendChild(img);
+      root.appendChild(sheet);
+      try { await img.decode(); } catch (e){}
+    }
+
+    btn.textContent = "Print";
+    document.body.classList.add("print-ready");
+    await new Promise(r => setTimeout(r, 60));
+    window.print();
+  } catch (err){
+    console.error(err);
+    clearPrint();
+    flashNote("Couldn\u2019t prepare the printout \u2014 try again", true);
+  } finally {
+    printing = false;
+    btn.disabled = false;
+    btn.textContent = "Print";
+  }
+}
+$("bPrint").addEventListener("click", printReading);
+
+/* Ctrl+P / Cmd+P goes through the same path as the button */
+document.addEventListener("keydown", e => {
+  if (!worksheet || !$("shell").classList.contains("on")) return;
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "p" || e.key === "P")){
+    e.preventDefault();
+    printReading();
+  }
+}, true);
 
 /* ===========================================================================
    6. START

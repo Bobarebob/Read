@@ -514,7 +514,7 @@ let answers    = {};       // "page.space" -> text, e.g. "3.2"
 let answerKey  = "";       // localStorage key: module code + student ID
 let canStore   = true;
 let blockCache = {};       // page number -> Promise of answer spaces
-let saveTick   = null;
+let dirty      = false;    // student changed something this session
 let noteTick   = null;
 let printing   = false;
 let printUrls  = [];
@@ -1252,7 +1252,8 @@ async function addAnswerLayer(box, n){
         return;
       }
       if (ta.value) answers[key] = ta.value; else delete answers[key];
-      queueSave();
+      dirty = true;
+      saveAnswers();
     });
 
     wrap.addEventListener("mousedown", e => {
@@ -1284,6 +1285,7 @@ function flashNote(text, warn){
 function startAnswers(sid){
   answerKey = "readAnswers:" + (localPdf ? "preview:" + localPdf.name : docId) + ":" + sid;
   answers = {};
+  dirty = false;
   try {
     const raw = localStorage.getItem(answerKey);
     if (raw){
@@ -1299,14 +1301,18 @@ function startAnswers(sid){
   restingNote();
 }
 
-function queueSave(){
-  clearTimeout(saveTick);
-  saveTick = setTimeout(saveAnswers, 500);
-}
+/* Every accepted keystroke is written straight away. An earlier version
+   waited half a second and relied on a last save when the page closed, but
+   quitting the whole browser doesn't reliably deliver that close event, and
+   whatever was typed in the final moment was lost.
+
+   Nothing is written unless the student actually changed something in this
+   session. If the browser hands back an out-of-date copy when it's reopened
+   (it can, when it hasn't finished writing to disk from the last session),
+   merely opening and closing the reading must not save that stale copy over
+   the good one. */
 function saveAnswers(){
-  clearTimeout(saveTick);
-  saveTick = null;
-  if (!worksheet || !answerKey || !canStore) return;
+  if (!worksheet || !answerKey || !canStore || !dirty) return;
   try {
     if (Object.keys(answers).length){
       localStorage.setItem(answerKey, JSON.stringify({
@@ -1337,6 +1343,7 @@ $("wsKeep").addEventListener("click", () => askClear(false));
 $("wsErase").addEventListener("click", () => {
   answers = {};
   document.querySelectorAll(".ans textarea").forEach(t => { t.value = ""; });
+  dirty = true;
   saveAnswers();
   askClear(false);
   flashNote("Answers cleared");

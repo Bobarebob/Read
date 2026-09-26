@@ -1023,7 +1023,9 @@ $("pages").addEventListener("dragstart", e => {
    Only runs when the module record has worksheet: true. Answer lines are
    found in the PDF itself, so a review sheet needs no form fields and no
    special export — draw lines in Writer and they become typing space.
-   Blanks typed with the underscore key (________) count too.
+   Blanks typed with the underscore key (________) count too. Dashed rules,
+   and rules 1.5 pt or heavier, are decoration (headers, footers) and are
+   never typing space.
    =========================================================================== */
 
 /* ---- finding the answer lines ---------------------------------------------
@@ -1065,7 +1067,10 @@ async function findAnswerLines(page){
   let ctm = [1, 0, 0, 1, 0, 0];
   const stack = [];
   let dashed = false;                 // a dashed rule is a separator, not a blank
-  const dashStack = [];
+  let lw = 1;                         // stroke width in user space
+  const dashStack = [], lwStack = [];
+  const THICK = 1.5;                  // rules this heavy are decoration (headers, footers)
+  const scaleOf = m => Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])) || 1;
   let pending = [];
   const found = [];
 
@@ -1089,7 +1094,7 @@ async function findAnswerLines(page){
         const xs = pts.map(v => v[0]), ys = pts.map(v => v[1]);
         const x0 = Math.min(...xs), x1 = Math.max(...xs);
         const y0 = Math.min(...ys), y1 = Math.max(...ys);
-        if (x1 - x0 >= minLen && y1 - y0 <= 3)
+        if (x1 - x0 >= minLen && y1 - y0 < THICK)
           pending.push({ kind: "rect", x0, x1, y: (y0 + y1) / 2, h: y1 - y0 });
         cx = x; cy = y;
       }
@@ -1098,8 +1103,10 @@ async function findAnswerLines(page){
 
   for (let i = 0; i < ol.fnArray.length; i++){
     const fn = ol.fnArray[i], a = ol.argsArray[i];
-    if      (fn === O.save)                  { stack.push(ctm); dashStack.push(dashed); }
-    else if (fn === O.restore)               { if (stack.length) ctm = stack.pop(); if (dashStack.length) dashed = dashStack.pop(); }
+    if      (fn === O.save)                  { stack.push(ctm); dashStack.push(dashed); lwStack.push(lw); }
+    else if (fn === O.restore)               { if (stack.length) ctm = stack.pop(); if (dashStack.length) dashed = dashStack.pop(); if (lwStack.length) lw = lwStack.pop(); }
+    else if (fn === O.setLineWidth)          lw = a[0];
+    else if (fn === O.setGState)             { for (const [k, v] of (a[0] || [])) if (k === "LW") lw = v; }
     else if (fn === O.setDash)               dashed = !!(a && a[0] && a[0].length);
     else if (fn === O.transform)             ctm = mul(ctm, a);
     else if (fn === O.paintFormXObjectBegin) { stack.push(ctm); if (a && a[0]) ctm = mul(ctm, a[0]); }
@@ -1107,7 +1114,7 @@ async function findAnswerLines(page){
     else if (fn === O.beginGroup)            { stack.push(ctm); if (a && a[0] && a[0].matrix) ctm = mul(ctm, a[0].matrix); }
     else if (fn === O.endGroup)              { if (stack.length) ctm = stack.pop(); }
     else if (fn === O.constructPath)         collect(a[0], a[1]);
-    else if (STROKE.has(fn))                 { if (!dashed) found.push(...pending); pending = []; }
+    else if (STROKE.has(fn))                 { if (!dashed && lw * scaleOf(ctm) < THICK) found.push(...pending); pending = []; }
     else if (FILL.has(fn))                   { found.push(...pending.filter(v => v.kind === "rect")); pending = []; }
     else if (fn === O.endPath)               pending = [];
   }

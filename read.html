@@ -376,7 +376,7 @@ body.worksheet .ws{display:flex;}
       <input id="fName" type="text" autocomplete="name" placeholder="First and last name">
     </div>
     <div class="field">
-      <label for="fId">Student ID</label>
+      <label for="fId" id="fIdLabel">Student ID</label>
       <input id="fId" type="text" inputmode="numeric" autocomplete="off" placeholder="7 digits">
     </div>
     <div class="field">
@@ -556,6 +556,41 @@ $("gateGo").addEventListener("click", openReading);
 
 function fail(msg){ $("gateMsg").textContent = msg; $("gateGo").disabled = false; }
 
+/* Student ID rule, set per reading in TeacherRead. A reading saved before the
+   setting existed has no idRule and gets 7 digits, enforced. The local
+   preview has no record, so the ID is optional there. */
+function idRuleOf(rec){
+  if (!rec) return { enforce: false, digits: 7 };
+  const r = rec.idRule;
+  if (!r) return { enforce: true, digits: 7 };
+  const d = Number(r.digits);
+  return { enforce: r.enforce !== false, digits: Number.isInteger(d) && d > 0 ? d : 7 };
+}
+function idProblem(sid, rule){
+  if (rule.enforce){
+    if (!new RegExp("^\\d{" + rule.digits + "}$").test(sid))
+      return "Enter your student ID \u2014 exactly " + rule.digits +
+             " digit" + (rule.digits === 1 ? "" : "s") + ", including any leading zero.";
+  } else if (sid.length > 40){
+    return "That student ID is too long.";
+  }
+  return null;
+}
+function dressId(rule){
+  const f = $("fId");
+  if (rule.enforce){
+    $("fIdLabel").textContent = "Student ID";
+    f.placeholder = rule.digits + " digit" + (rule.digits === 1 ? "" : "s");
+    f.inputMode   = "numeric";
+    f.maxLength   = rule.digits;
+  } else {
+    $("fIdLabel").innerHTML = 'Student ID <span style="opacity:.6">(optional)</span>';
+    f.placeholder = "";
+    f.inputMode   = "text";
+    f.maxLength   = 40;
+  }
+}
+
 async function openReading(){
   const name = $("fName").value.trim();
   const sid  = $("fId").value.trim();
@@ -565,7 +600,12 @@ async function openReading(){
 
   if (!docId && !localPdf) return fail("This link is missing its module code. Use the link posted in Canvas.");
   if (name.length < 2) return fail("Enter your full name as it appears in the course roster.");
-  if (!/^\d{5,9}$/.test(sid)) return fail("Enter your student ID — digits only, including any leading zero.");
+  /* Before the record arrives the rule is unknown; check what we can now and
+     the exact rule once the record is in hand. */
+  if (preloaded || localPdf){
+    const bad = idProblem(sid, idRuleOf(localPdf ? null : preloaded));
+    if (bad) return fail(bad);
+  }
 
   $("gateGo").disabled = true;
   $("gateGo").textContent = "Opening\u2026";
@@ -574,6 +614,8 @@ async function openReading(){
     record = await resolveModule();
 
     if (!record) return reset("No reading module matches this link. Check the link posted in Canvas.");
+    const idBad = idProblem(sid, idRuleOf(localPdf ? null : record));
+    if (idBad) return reset(idBad);
     if (record.password && String(record.password) !== pw)
       return reset(pw ? "That password doesn't match this module."
                       : "This module needs a password.");
@@ -585,13 +627,13 @@ async function openReading(){
 
     copyrightLine = record.copyrightNotice || DEFAULT_COPYRIGHT;
     watermarkText =
-      `Licensed to ${name} (${sid})` +
+      `Licensed to ${name}` + (sid ? ` (${sid})` : "") +
       (record.course ? `  \u00B7  ${record.course}` : "") +
       `  \u00B7  Not for redistribution`;
 
     worksheet = record.worksheet === true;
     document.body.classList.toggle("worksheet", worksheet);
-    if (worksheet) startAnswers(sid);
+    if (worksheet) startAnswers(sid || "name:" + name.toLowerCase());
 
     $("bTitle").textContent = record.title || "Reading module";
     $("bWho").textContent   = [record.course, name, sid].filter(Boolean).join("  \u00B7  ");
@@ -1552,13 +1594,16 @@ let preloaded = null;
 
 function dressGate(rec){
   $("gateTitle").textContent = rec.title || "Reading module";
+  const rule = idRuleOf(rec);
+  dressId(rule);
 
   /* Name what the student is actually being asked for. The password half is
      tied to the same value that decides whether the field is shown at all, so
      the sentence can't promise a box that isn't there. */
+  const who  = rule.enforce ? "your name and ID" : "your name";
   const asks = rec.password
-    ? "Enter your name and ID, and the module password, to open the reading."
-    : "Enter your name and ID to open the reading.";
+    ? "Enter " + who + ", and the module password, to open the reading."
+    : "Enter " + who + " to open the reading.";
   $("gateSub").textContent = rec.course ? rec.course + ". " + asks : asks;
 
   if (!rec.password) $("fPw").closest(".field").style.display = "none";
@@ -1574,6 +1619,7 @@ if (known){
     $("gateTitle").textContent = "Preview";
     $("gateSub").textContent   = "Pick a PDF below to see how a module will look. Name and ID show up in the page footer.";
     $("localRow").style.display = "block";
+    dressId(idRuleOf(null));
     $("fPw").closest(".field").style.display = "none";
   } else {
     $("gateTitle").textContent = "Link incomplete";

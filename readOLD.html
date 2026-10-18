@@ -1,0 +1,1616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Reading Module</title>
+
+<!--
+  ============================================================================
+  read.html  —  Student reading-module viewer
+  Copyright © Magellica Press - R. Mahoney - 2026, All Rights Reserved.
+
+  Companion to video.html. Renders a PDF inside your own chrome using pdf.js,
+  so there is no browser PDF toolbar, no download button, no print button and
+  no "open in new tab" popout to mask.
+
+  WORKSHEET MODE (worksheet: true on the record, set in TeacherRead)
+  Answer lines in the PDF are found automatically and become typing areas.
+  Students get a Print button that prints the pages with what they typed, and
+  their answers are kept in their own browser (localStorage, one entry per
+  module code + student ID). Nothing typed is ever sent to Firestore.
+  Without the switch the module stays screen-only, exactly as before.
+
+  URL:  read.html?doc=CH01
+
+  FIRESTORE  — collection: documents,  document id = the ?doc= value
+  ---------------------------------------------------------------------------
+  {
+    title:            "Chapter 1 — The Celestial Sphere",   // required
+    course:           "PHSCI-102-01 Astronomy",             // required
+    pdfUrl:           "https://.../ch01.pdf",               // required
+    password:         "orion",                              // required
+    copyrightNotice:  "",        // optional, blank = default constant below
+    watermark:        true,      // optional, absent = true
+    worksheet:        false,     // optional, absent = false (typing + printing)
+    availability: {              // optional, both blank = always open
+      start: "2026-09-01T00:00",
+      stop:  "2026-12-20T23:59"
+    }
+  }
+
+  NOTE ON THE DATA MODEL: video.html splits videos / videoSettings because the
+  teacher dashboard edits attempts and dates separately. There is no reading
+  dashboard yet and no grading here, so this uses ONE collection. Splitting it
+  later is a rename, not a rewrite.
+
+  CORS: pdf.js fetches the PDF with XHR, so the host must send
+  Access-Control-Allow-Origin. GitHub Pages already does. A Google Cloud
+  Storage bucket does NOT until you set a CORS config on it.
+  ============================================================================
+-->
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+<style>
+:root{
+  --ink:      #161A2B;
+  --ink-2:    #212741;
+  --line:     #2E3654;
+  --paper:    #F7F5F0;
+  --type:     #DDE2F0;
+  --muted:    #8C97B4;
+  --brass:    #C9A227;
+  --danger:   #E0736A;
+  --band:     58px;   /* banner height */
+  --rail:     44px;   /* toolbar height */
+  --foot:     34px;   /* copyright rail height */
+  --serif:    Georgia, "Iowan Old Style", "Palatino Linotype", Palatino, serif;
+  --sans:     system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+*{box-sizing:border-box;}
+html,body{height:100%;margin:0;}
+body{
+  background:var(--ink);
+  color:var(--type);
+  font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;
+  overflow:hidden;
+}
+button{font-family:inherit;}
+:focus-visible{outline:2px solid var(--brass);outline-offset:2px;}
+
+/* ---------------------------------------------------------------- login -- */
+#gate{
+  position:fixed;inset:0;z-index:60;
+  display:flex;align-items:center;justify-content:center;
+  padding:24px;
+  background:
+    radial-gradient(1200px 600px at 50% -10%, #2A3153 0%, transparent 60%),
+    var(--ink);
+}
+.gate-card{
+  width:100%;max-width:420px;
+  background:var(--ink-2);
+  border:1px solid var(--line);
+  border-radius:10px;
+  padding:30px 30px 26px;
+}
+.gate-mark{
+  font-family:var(--serif);
+  font-size:13px;letter-spacing:.02em;
+  color:var(--brass);
+  margin:0 0 22px;
+}
+.gate-card h1{
+  font-family:var(--serif);
+  font-weight:400;
+  font-size:25px;line-height:1.25;
+  margin:0 0 6px;
+}
+.gate-sub{color:var(--muted);font-size:13.5px;line-height:1.5;margin:0 0 24px;}
+.field{margin-bottom:15px;}
+.field label{display:block;font-size:12.5px;color:var(--muted);margin-bottom:6px;}
+.field input{
+  width:100%;padding:10px 12px;
+  background:#151A2E;
+  border:1px solid var(--line);
+  border-radius:6px;
+  color:var(--type);font-size:15px;
+}
+.field input::placeholder{color:#5A6382;}
+.pw-wrap{position:relative;}
+.pw-wrap input{padding-right:44px;}
+.pw-eye{
+  position:absolute;right:4px;top:50%;transform:translateY(-50%);
+  width:36px;height:32px;
+  background:none;border:0;cursor:pointer;
+  color:var(--muted);
+  display:flex;align-items:center;justify-content:center;
+  border-radius:5px;
+}
+.pw-eye:hover{color:var(--type);}
+.gate-btn{
+  width:100%;margin-top:10px;padding:11px;
+  background:var(--brass);color:#1A1608;
+  border:0;border-radius:6px;
+  font-size:15px;font-weight:600;cursor:pointer;
+}
+.gate-btn:hover{background:#DBB334;}
+.gate-btn:disabled{opacity:.5;cursor:default;}
+.gate-msg{
+  min-height:18px;margin-top:14px;
+  font-size:13px;line-height:1.45;color:var(--danger);
+}
+.gate-note{
+  margin-top:22px;padding-top:16px;
+  border-top:1px solid var(--line);
+  font-size:11.5px;line-height:1.55;color:#6E789A;
+}
+
+/* ---------------------------------------------------------------- shell -- */
+#shell{
+  position:fixed;inset:0;z-index:1;
+  display:none;
+  grid-template-rows:var(--band) var(--rail) 1fr var(--foot);
+}
+#shell.on{display:grid;}
+
+.banner{
+  display:flex;align-items:center;gap:16px;
+  padding:0 18px;
+  background:var(--ink-2);
+  border-bottom:1px solid var(--line);
+  min-width:0;
+}
+.banner-title{
+  font-family:var(--serif);
+  font-size:17px;font-weight:400;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  min-width:0;flex:1;
+}
+.banner-who{
+  font-size:12.5px;color:var(--muted);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  max-width:46%;text-align:right;
+}
+@media (max-width:640px){ .banner-who{display:none;} }
+
+.rail{
+  display:flex;align-items:center;gap:6px;
+  padding:0 12px;
+  background:#1A2036;
+  border-bottom:1px solid var(--line);
+}
+.rail-gap{flex:1;}
+.tbtn{
+  height:28px;min-width:30px;padding:0 9px;
+  background:transparent;border:1px solid var(--line);
+  border-radius:5px;color:var(--type);
+  font-size:13px;cursor:pointer;
+  display:inline-flex;align-items:center;justify-content:center;
+}
+.tbtn:hover:not(:disabled){background:#252C48;border-color:#3D466B;}
+.tbtn:disabled{opacity:.35;cursor:default;}
+.pager{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);}
+.pager input{
+  width:46px;height:28px;padding:0 6px;text-align:center;
+  background:#151A2E;border:1px solid var(--line);border-radius:5px;
+  color:var(--type);font-size:13px;font-variant-numeric:tabular-nums;
+}
+.zoomval{
+  font-size:12.5px;color:var(--muted);
+  min-width:44px;text-align:center;font-variant-numeric:tabular-nums;
+}
+
+/* --------------------------------------------------------------- pages --- */
+#scroll{
+  overflow:auto;
+  background:#0F1322;
+  padding:20px 16px 40px;
+  scroll-behavior:auto;
+}
+#pages{
+  overflow-anchor:none;
+  margin:0 auto;
+  display:flex;flex-direction:column;align-items:center;gap:18px;
+}
+.page{
+  position:relative;
+  background:var(--paper);
+  border-radius:2px;
+  box-shadow:0 2px 14px rgba(0,0,0,.45);
+  overflow:hidden;
+  /* iOS long-press otherwise offers Copy Image / Save Image */
+  -webkit-touch-callout:none;
+  -webkit-user-select:none;
+  user-select:none;
+}
+.page canvas{
+  display:block;width:100%;height:100%;
+  -webkit-touch-callout:none;
+  pointer-events:none;
+}
+
+/* Live hyperlinks laid over the rendered page */
+.linklayer{
+  position:absolute;left:0;top:0;width:100%;
+  pointer-events:none;
+}
+.pdflink{
+  position:absolute;display:block;
+  pointer-events:auto;
+  -webkit-touch-callout:default;
+  -webkit-user-select:none;
+  background:rgba(58,110,214,0);
+  border-radius:2px;
+  transition:background .12s ease;
+}
+.pdflink:hover{background:rgba(58,110,214,.16);}
+.pdflink:focus-visible{
+  background:rgba(201,162,39,.22);
+  outline:2px solid var(--brass);outline-offset:1px;
+}
+.page.pending::after{
+  content:attr(data-n);
+  position:absolute;inset:0;
+  display:flex;align-items:center;justify-content:center;
+  font-family:var(--serif);font-size:34px;color:#D3CFC5;
+}
+
+/* ------------------------------------------------------------ worksheet -- */
+.rail{overflow-x:auto;scrollbar-width:none;}
+.rail > *:not(.rail-gap){flex:none;}
+.rail .tbtn,.rail .pager{white-space:nowrap;}
+.rail::-webkit-scrollbar{display:none;}
+.ws{display:none;align-items:center;gap:6px;}
+body.worksheet .ws{display:flex;}
+.ws-group{display:flex;align-items:center;gap:6px;}
+.ws-group[hidden]{display:none;}
+.ws-note{font-size:12px;color:var(--muted);white-space:nowrap;margin-right:4px;}
+.ws-note.warn{color:var(--danger);}
+.ws-sep{width:1px;height:20px;background:var(--line);margin:0 6px 0 4px;flex:none;}
+.tbtn.danger{border-color:#5A3438;color:var(--danger);}
+.tbtn.danger:hover{background:#3A2126;}
+@media (max-width:820px){ .ws-note{display:none;} .ws-group .ws-note.ask{display:inline;} }
+
+/* Typing areas laid over the answer lines */
+.anslayer{position:absolute;left:0;top:0;width:100%;pointer-events:none;}
+.ans{
+  position:absolute;
+  pointer-events:auto;
+  background:rgba(74,128,230,.10);
+  border-radius:3px;
+  cursor:text;
+  transition:background .12s ease, box-shadow .12s ease;
+}
+.ans:hover{background:rgba(74,128,230,.15);}
+.ans:focus-within{background:rgba(74,128,230,.16);box-shadow:0 0 0 1.5px rgba(58,110,214,.6);}
+.ans.full{box-shadow:0 0 0 2px rgba(224,115,106,.9);}
+.ans textarea{
+  position:absolute;
+  margin:0;border:0;padding:0;border-radius:0;
+  background:transparent;
+  color:#1C3F94;
+  resize:none;overflow:hidden;outline:none;
+  white-space:pre-wrap;overflow-wrap:break-word;
+  -webkit-user-select:text;user-select:text;
+  -webkit-touch-callout:default;
+}
+#printRoot{display:none;}
+
+/* ---------------------------------------------------------------- foot --- */
+.foot{
+  display:flex;align-items:center;justify-content:center;
+  padding:0 14px;
+  background:linear-gradient(to top,#191E33,#212741);
+  border-top:1px solid #3A4468;
+  font-family:var(--serif);
+  font-size:12px;letter-spacing:.02em;
+  color:#F4E2A4;
+  text-shadow:
+    0 0 4px rgba(201,162,39,.75),
+    0 0 12px rgba(201,162,39,.42),
+    0 0 26px rgba(201,162,39,.18);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+
+/* ------------------------------------------------------------ fullscreen -- */
+/* Percentage heights collapse in Firefox inside :fullscreen. Pin to vh. */
+#shell:fullscreen,
+#shell:-webkit-full-screen{
+  width:100vw !important;
+  height:100vh !important;
+  grid-template-rows:var(--band) var(--rail) 1fr var(--foot) !important;
+  background:var(--ink) !important;
+}
+#shell:fullscreen #scroll,
+#shell:-webkit-full-screen #scroll{
+  height:calc(100vh - var(--band) - var(--rail) - var(--foot)) !important;
+}
+
+/* --------------------------------------------------------------- print --- */
+@media print{
+  @page{margin:0.3in;}
+  html,body{height:auto !important;overflow:visible !important;background:#fff !important;}
+  body *{display:none !important;}
+  body::after{
+    content:"This reading module is licensed for on-screen course use and cannot be printed.";
+    display:block !important;
+    font:15px/1.6 Georgia, serif;color:#000;padding:60px;
+  }
+  /* Worksheets print only through the toolbar button, which builds the pages
+     first. The browser's own Print menu can't wait for that, so it gets a
+     pointer to the button instead of a blank sheet. */
+  body.worksheet::after{
+    content:"To print this worksheet, use the Print button in the reader\2019s toolbar.";
+  }
+  body.print-ready::after{content:none;display:none !important;}
+  body.print-ready #printRoot{display:block !important;}
+  body.print-ready #printRoot .pp{
+    display:block !important;text-align:center;
+    break-after:page;page-break-after:always;
+  }
+  body.print-ready #printRoot .pp:last-child{break-after:auto;page-break-after:auto;}
+  body.print-ready #printRoot img{
+    display:inline-block !important;
+    width:auto;height:auto;max-width:100%;max-height:10.25in;
+  }
+}
+</style>
+</head>
+<body>
+
+<!-- ============================== LOGIN ============================== -->
+<div id="gate">
+  <div class="gate-card">
+    <p class="gate-mark">Magellica Press</p>
+    <h1 id="gateTitle">Reading module</h1>
+    <p class="gate-sub" id="gateSub">Enter your name and ID, and the module password, to open the reading.</p>
+
+    <div class="field">
+      <label for="fName">Your name</label>
+      <input id="fName" type="text" autocomplete="name" placeholder="First and last name">
+    </div>
+    <div class="field">
+      <label for="fId">Student ID</label>
+      <input id="fId" type="text" inputmode="numeric" autocomplete="off" placeholder="7 digits">
+    </div>
+    <div class="field">
+      <label for="fPw">Module password</label>
+      <div class="pw-wrap">
+        <input id="fPw" type="password" autocomplete="off">
+        <button class="pw-eye" id="pwEye" type="button" aria-label="Show password">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
+            <path d="M1.5 12S5 5.5 12 5.5 22.5 12 22.5 12 19 18.5 12 18.5 1.5 12 1.5 12Z"/>
+            <circle cx="12" cy="12" r="3.1"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="field" id="localRow" style="display:none">
+      <label for="fFile">Preview a PDF from this computer</label>
+      <input id="fFile" type="file" accept="application/pdf"
+             style="padding:8px;font-size:13px;color:var(--muted)">
+      <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:var(--type)">
+        <input id="fWork" type="checkbox" style="width:16px;height:16px;accent-color:var(--brass)">
+        Treat it as a worksheet (typing and printing)
+      </label>
+    </div>
+
+    <button class="gate-btn" id="gateGo">Open reading</button>
+    <p class="gate-msg" id="gateMsg" role="status"></p>
+
+    <p class="gate-note">
+      Your name and ID appear in the footer of each page of your copy. This
+      module is licensed to you for this course and is not for redistribution.
+    </p>
+  </div>
+</div>
+
+<!-- ============================== READER ============================= -->
+<div id="shell">
+
+  <div class="banner">
+    <div class="banner-title" id="bTitle"></div>
+    <div class="banner-who" id="bWho"></div>
+  </div>
+
+  <div class="rail">
+    <button class="tbtn" id="bPrev" title="Previous page (←)" aria-label="Previous page">‹</button>
+    <div class="pager">
+      <input id="bNum" type="text" inputmode="numeric" aria-label="Page number" value="1">
+      <span>of <span id="bTot">–</span></span>
+    </div>
+    <button class="tbtn" id="bNext" title="Next page (→)" aria-label="Next page">›</button>
+
+    <div class="rail-gap"></div>
+
+    <div class="ws" id="wsBar">
+      <span class="ws-group" id="wsMain">
+        <span class="ws-note" id="wsNote" role="status"></span>
+        <button class="tbtn" id="bClear" title="Erase everything you typed on this reading">Clear answers</button>
+        <button class="tbtn" id="bPrint" title="Print the pages with your answers (Ctrl+P)">Print</button>
+      </span>
+      <span class="ws-group" id="wsAsk" hidden>
+        <span class="ws-note ask">Erase everything you typed on this reading?</span>
+        <button class="tbtn danger" id="wsErase">Erase</button>
+        <button class="tbtn" id="wsKeep">Keep</button>
+      </span>
+      <span class="ws-sep"></span>
+    </div>
+
+    <button class="tbtn" id="bOut" title="Zoom out" aria-label="Zoom out">−</button>
+    <span class="zoomval" id="bZoom">100%</span>
+    <button class="tbtn" id="bIn" title="Zoom in" aria-label="Zoom in">+</button>
+    <button class="tbtn" id="bFit" title="Fit page width">Fit width</button>
+    <button class="tbtn" id="bFull" title="Full screen (F)" aria-label="Full screen">⛶</button>
+  </div>
+
+  <div id="scroll" tabindex="0">
+    <div id="pages"></div>
+  </div>
+
+  <div class="foot" id="bFoot"></div>
+</div>
+
+<!-- Filled only while a worksheet is being printed -->
+<div id="printRoot" aria-hidden="true"></div>
+
+<script>
+/* ===========================================================================
+   1. CONFIG  —  paste the same firebaseConfig object you use in TeacherVideo.
+   That is the only edit this file needs. Everything else about a reading is
+   set in TeacherRead_v1_0.html on your desktop.
+   =========================================================================== */
+const firebaseConfig = {
+  apiKey:            "AIzaSyApECjlGt_AgK9853JGWsyPuWuXIRyRQOA",
+  authDomain:        "astronomy-course.firebaseapp.com",
+  projectId:         "astronomy-course",
+  storageBucket:     "astronomy-course.firebasestorage.app",
+  messagingSenderId: "84123424550",
+  appId:             "1:84123424550:web:f6eab6a447d480cedc13e7"
+};
+const useFirestore = () => !String(firebaseConfig.apiKey).startsWith("PASTE_FROM");
+
+/* Optional hand-written modules, for testing without the database.
+   TeacherRead is the normal way to add a reading; leave this empty. */
+const MODULES = {};
+
+const DEFAULT_COPYRIGHT =
+  "Copyright \u00A9 Magellica Press - R. Mahoney - 2026, All Rights Reserved.";
+
+const COLLECTION = "readings";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+/* ===========================================================================
+   2. STATE
+   =========================================================================== */
+const $ = id => document.getElementById(id);
+
+let db = null;
+let record = null;         // the Firestore document record
+let pdfDoc = null;
+let pageBoxes = [];        // one wrapper div per page
+let baseSizes = [];        // unscaled {w,h} per page
+let renderTasks = [];      // in-flight pdf.js render tasks
+let scale = 1;
+let fitWidth = true;
+let watermarkText = "";
+let copyrightLine = "";
+let observer = null;
+let localPdf = null;       // {name, data} when previewing a file from disk
+let layoutWidth = 0;       // scroll width the current layout was built for
+
+/* Worksheet mode — typing on answer lines, printing, answers kept locally */
+let worksheet  = false;
+let answers    = {};       // "page.space" -> text, e.g. "3.2"
+let answerKey  = "";       // localStorage key: module code + student ID
+let canStore   = true;
+let blockCache = {};       // page number -> Promise of answer spaces
+let dirty      = false;    // student changed something this session
+let noteTick   = null;
+let printing   = false;
+let printUrls  = [];
+const PRINT_SCALE = 2.5;   // 180 dpi on paper
+const ANS_FONT = '"Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+const ANS_INK  = "#1C3F94";
+
+/* Viewing record (not a grade) */
+const VIEWS      = "readingViews";
+const BEAT_MS    = 30000;   // how often the session doc is updated
+const IDLE_MS    = 120000;  // no interaction this long and the clock pauses
+let viewRef      = null;
+let activeSec    = 0;
+let lastTouch    = Date.now();
+let furthestPage = 1;
+let beatTimer    = null;
+let tickTimer    = null;
+
+const DPR   = Math.min(window.devicePixelRatio || 1, 2);
+const MINZOOM = 0.67;     // floor, so a page never shrinks away from its footer
+const BAND  = 36;          // CSS px of footer band added under each page
+const docId = new URLSearchParams(location.search).get("doc");
+
+/* ===========================================================================
+   3. LOGIN
+   =========================================================================== */
+$("pwEye").addEventListener("click", () => {
+  const f = $("fPw");
+  const show = f.type === "password";
+  f.type = show ? "text" : "password";
+  $("pwEye").setAttribute("aria-label", show ? "Hide password" : "Show password");
+  f.focus();
+});
+
+["fName","fId","fPw"].forEach(id =>
+  $(id).addEventListener("keydown", e => { if (e.key === "Enter") openReading(); })
+);
+$("gateGo").addEventListener("click", openReading);
+
+function fail(msg){ $("gateMsg").textContent = msg; $("gateGo").disabled = false; }
+
+async function openReading(){
+  const name = $("fName").value.trim();
+  const sid  = $("fId").value.trim();
+  const pw   = $("fPw").value;
+
+  $("gateMsg").textContent = "";
+
+  if (!docId && !localPdf) return fail("This link is missing its module code. Use the link posted in Canvas.");
+  if (name.length < 2) return fail("Enter your full name as it appears in the course roster.");
+  if (!/^\d{5,9}$/.test(sid)) return fail("Enter your student ID — digits only, including any leading zero.");
+
+  $("gateGo").disabled = true;
+  $("gateGo").textContent = "Opening\u2026";
+
+  try {
+    record = await resolveModule();
+
+    if (!record) return reset("No reading module matches this link. Check the link posted in Canvas.");
+    if (record.password && String(record.password) !== pw)
+      return reset(pw ? "That password doesn't match this module."
+                      : "This module needs a password.");
+
+    const win = windowState(record.availability);
+    if (win) return reset(win);
+    if (!record.pdfUrl && !record.pdfData)
+      return reset("This module has no file attached yet. Let your instructor know.");
+
+    copyrightLine = record.copyrightNotice || DEFAULT_COPYRIGHT;
+    watermarkText =
+      `Licensed to ${name} (${sid})` +
+      (record.course ? `  \u00B7  ${record.course}` : "") +
+      `  \u00B7  Not for redistribution`;
+
+    worksheet = record.worksheet === true;
+    document.body.classList.toggle("worksheet", worksheet);
+    if (worksheet) startAnswers(sid);
+
+    $("bTitle").textContent = record.title || "Reading module";
+    $("bWho").textContent   = [record.course, name, sid].filter(Boolean).join("  \u00B7  ");
+    $("bFoot").textContent  = copyrightLine;
+    document.title          = record.title || "Reading module";
+
+    /* The shell must be on screen before layout runs — fit-width measures the
+       scroll container, and a display:none container measures zero. */
+    $("gate").style.display = "none";
+    $("shell").classList.add("on");
+
+    await loadPdf(record.pdfData ? { data: record.pdfData } : { url: record.pdfUrl });
+    /* Lazy rendering swaps placeholders for canvases, which lets the browser's
+       scroll anchoring drift. Pin it back to the first page. */
+    $("scroll").scrollTop = 0;
+    $("bNum").value = 1;
+    requestAnimationFrame(() => { $("scroll").scrollTop = 0; });
+    setTimeout(() => { $("scroll").scrollTop = 0; }, 250);
+    $("scroll").focus({ preventScroll: true });
+
+    startViewRecord(name, sid);
+
+  } catch (err){
+    console.error(err);
+    $("shell").classList.remove("on");
+    $("gate").style.display = "flex";
+    reset(pdfProblem(err, record && record.pdfUrl));
+  }
+
+  function reset(msg){
+    $("gateGo").textContent = "Open reading";
+    fail(msg);
+  }
+}
+
+/* Lookup order: local file preview -> MODULES table -> Firestore (if set up) */
+async function resolveModule(){
+  if (localPdf) return {
+    title:   localPdf.name.replace(/\.pdf$/i, ""),
+    course:  "Local preview",
+    pdfData: localPdf.data,
+    worksheet: $("fWork").checked
+  };
+
+  if (preloaded) return preloaded;
+  if (MODULES[docId]) return MODULES[docId];
+
+  if (!useFirestore()) return null;
+  if (!db){ firebase.initializeApp(firebaseConfig); db = firebase.firestore(); }
+  const snap = await db.collection(COLLECTION).doc(docId).get();
+  return snap.exists ? snap.data() : null;
+}
+
+function windowState(av){
+  if (!av) return null;
+  const now = new Date();
+  if (av.start && now < new Date(av.start))
+    return "This reading opens " + new Date(av.start).toLocaleString() + ".";
+  if (av.stop && now > new Date(av.stop))
+    return "This reading closed " + new Date(av.stop).toLocaleString() + ".";
+  return null;
+}
+
+/* ===========================================================================
+   4. PDF LOADING AND LAYOUT
+   =========================================================================== */
+/* pdf.js failures all look alike from the outside. Pull them apart so the
+   message says which one it is. */
+function pdfProblem(err, url){
+  const name   = (err && err.name) || "";
+  const status = err && err.status;
+  const where  = url ? " (" + url + ")" : "";
+
+  if (name === "MissingPDFException" || status === 404)
+    return "The PDF isn't at that address" + where + ". Open it in a browser "
+         + "tab yourself \u2014 if it 404s, the file wasn't pushed, or the "
+         + "folder name is capitalized differently.";
+
+  if (name === "UnexpectedResponseException")
+    return "The server answered with an error" + (status ? " (" + status + ")" : "")
+         + " instead of the PDF.";
+
+  if (name === "InvalidPDFException")
+    return "That file downloaded, but it isn't a readable PDF.";
+
+  if (name === "PasswordException")
+    return "That PDF is password-protected. Save an unprotected copy and use that.";
+
+  return "Couldn't fetch the PDF" + where + ". Most often that means the "
+       + "address is wrong, or the site hosting it won't let this page read it. "
+       + (err && err.message ? "(" + err.message + ")" : "");
+}
+
+async function loadPdf(src){
+  pdfDoc = await pdfjsLib.getDocument(
+    Object.assign({ isEvalSupported:false }, src)
+  ).promise;
+  $("bTot").textContent = pdfDoc.numPages;
+  blockCache = {};
+
+  baseSizes = [];
+  for (let n = 1; n <= pdfDoc.numPages; n++){
+    const vp = (await pdfDoc.getPage(n)).getViewport({ scale: 1 });
+    baseSizes.push({ w: vp.width, h: vp.height });
+  }
+  layout();
+}
+
+function fitScale(){
+  const avail = $("scroll").clientWidth - 32;
+  const widest = Math.max(...baseSizes.map(s => s.w));
+  return Math.max(MINZOOM, Math.min(3, avail / widest));
+}
+
+function layout(){
+  renderTasks.forEach(t => { try { t.cancel(); } catch(e){} });
+  renderTasks = [];
+  if (observer) observer.disconnect();
+
+  layoutWidth = $("scroll").clientWidth;
+  if (fitWidth) scale = fitScale();
+  $("bZoom").textContent = Math.round(scale * 100) + "%";
+  syncZoomButtons();
+
+  const host = $("pages");
+  host.innerHTML = "";
+  pageBoxes = [];
+
+  baseSizes.forEach((s, i) => {
+    const box = document.createElement("div");
+    box.className = "page pending";
+    box.dataset.n = i + 1;
+    box.style.width  = Math.round(s.w * scale) + "px";
+    box.style.height = Math.round(s.h * scale + BAND) + "px";
+    host.appendChild(box);
+    pageBoxes.push(box);
+  });
+
+  observer = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) renderPage(Number(e.target.dataset.n));
+    });
+  }, { root: $("scroll"), rootMargin: "600px 0px" });
+
+  pageBoxes.forEach(b => observer.observe(b));
+}
+
+async function renderPage(n){
+  const box = pageBoxes[n - 1];
+  if (!box || box.dataset.done === "1" || box.dataset.busy === "1") return;
+  box.dataset.busy = "1";
+
+  try {
+    const page = await pdfDoc.getPage(n);
+    const vp   = page.getViewport({ scale: scale * DPR });
+
+    const canvas = document.createElement("canvas");
+    canvas.width  = Math.round(vp.width);
+    canvas.height = Math.round(vp.height + BAND * DPR);
+    const ctx = canvas.getContext("2d", { alpha:false });
+
+    ctx.fillStyle = "#FFFFFF";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const task = page.render({ canvasContext: ctx, viewport: vp });
+    renderTasks.push(task);
+    await task.promise;
+
+    if (record.watermark !== false) stampFooter(ctx, canvas.width, vp.height, canvas.height);
+
+    box.innerHTML = "";
+    box.appendChild(canvas);
+    await addLinkLayer(box, page, n);
+    if (worksheet) await addAnswerLayer(box, n);
+    box.classList.remove("pending");
+    box.dataset.done = "1";
+  } catch (err){
+    if (err && err.name !== "RenderingCancelledException") console.error("page " + n, err);
+  } finally {
+    box.dataset.busy = "0";
+  }
+}
+
+/* The band sits BELOW the rendered page, so nothing in the reading is ever
+   covered — the same convention a licensed publisher copy uses. */
+function stampFooter(ctx, w, pageH, totalH, k = DPR){
+  const h  = totalH - pageH;
+  const fs = Math.max(8.5 * k, Math.min(11 * k, w * 0.0105));
+
+  ctx.save();
+  ctx.fillStyle = "#F1EEE8";
+  ctx.fillRect(0, pageH, w, h);
+  ctx.fillStyle = "#DAD5CA";
+  ctx.fillRect(0, pageH, w, Math.max(1, k));
+
+  ctx.font = fs + "px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "center";
+
+  ctx.fillStyle = "#5C5648";
+  ctx.fillText(copyrightLine, w / 2, pageH + h * 0.34, w - 24 * k);
+  ctx.fillStyle = "#8A8478";
+  ctx.fillText(watermarkText, w / 2, pageH + h * 0.70, w - 24 * k);
+  ctx.restore();
+}
+
+/* ---------------------------------------------------------------------------
+   Canvas rendering is only pixels, so a PDF's own hyperlinks stop working.
+   pdf.js still hands us the link annotations, so we lay real <a> elements over
+   the page at the right coordinates. Internal jumps scroll this viewer;
+   external links open in a new tab.
+   --------------------------------------------------------------------------- */
+async function addLinkLayer(box, page, n){
+  let annots;
+  try { annots = await page.getAnnotations({ intent: "display" }); }
+  catch (e){ return; }
+  if (!annots || !annots.length) return;
+
+  const vp    = page.getViewport({ scale });   // CSS pixels, not device pixels
+  const layer = document.createElement("div");
+  layer.className = "linklayer";
+  layer.style.height = vp.height + "px";
+
+  let count = 0;
+
+  for (const a of annots){
+    if (a.subtype !== "Link") continue;
+    if (!a.url && !a.dest) continue;
+
+    const r    = vp.convertToViewportRectangle(a.rect);
+    const left = Math.min(r[0], r[2]);
+    const top  = Math.min(r[1], r[3]);
+    const w    = Math.abs(r[2] - r[0]);
+    const h    = Math.abs(r[3] - r[1]);
+    if (w < 2 || h < 2) continue;
+
+    const el = document.createElement("a");
+    el.className = "pdflink";
+    el.style.cssText = `left:${left}px;top:${top}px;width:${w}px;height:${h}px;`;
+
+    if (a.url){
+      el.href   = a.url;
+      el.target = "_blank";
+      el.rel    = "noopener noreferrer";
+      el.title  = a.url;
+    } else {
+      el.href  = "#";
+      el.title = "Go to another page in this reading";
+      el.addEventListener("click", async ev => {
+        ev.preventDefault();
+        const p = await resolveDest(a.dest);
+        if (p) goToPage(p);
+      });
+    }
+
+    layer.appendChild(el);
+    count++;
+  }
+
+  if (count) box.appendChild(layer);
+}
+
+async function resolveDest(dest){
+  try {
+    const d = typeof dest === "string" ? await pdfDoc.getDestination(dest) : dest;
+    if (!Array.isArray(d) || !d.length) return null;
+    return (await pdfDoc.getPageIndex(d[0])) + 1;
+  } catch (e){ return null; }
+}
+
+/* ---------------------------------------------------------------------------
+   Viewing record. One document per session. The clock only runs while the tab
+   is visible AND the reader has been touched in the last couple of minutes, so
+   a tab left open overnight doesn't bank hours. This is attendance, not proof
+   of reading, and the name is whatever the student typed.
+   --------------------------------------------------------------------------- */
+async function startViewRecord(name, sid){
+  if (localPdf || !useFirestore()) return;
+  if (record.trackViews === false) return;
+
+  try {
+    if (!db){ firebase.initializeApp(firebaseConfig); db = firebase.firestore(); }
+    viewRef = db.collection(VIEWS).doc();
+    await viewRef.set({
+      code:         docId,
+      title:        record.title || "",
+      course:       record.course || "",
+      name:         name,
+      studentId:    sid,
+      opened:       new Date().toISOString(),
+      lastSeen:     new Date().toISOString(),
+      activeSeconds: 0,
+      furthestPage: 1,
+      totalPages:   pdfDoc ? pdfDoc.numPages : 0
+    });
+  } catch (e){
+    console.warn("view record not started", e);
+    viewRef = null;
+    return;
+  }
+
+  ["pointerdown","keydown","wheel","touchstart"].forEach(ev =>
+    document.addEventListener(ev, () => { lastTouch = Date.now(); }, { passive:true }));
+  $("scroll").addEventListener("scroll", () => { lastTouch = Date.now(); }, { passive:true });
+
+  tickTimer = setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    if (Date.now() - lastTouch > IDLE_MS) return;
+    activeSec++;
+    const p = currentPage();
+    if (p > furthestPage) furthestPage = p;
+  }, 1000);
+
+  beatTimer = setInterval(saveBeat, BEAT_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") saveBeat();
+  });
+  window.addEventListener("pagehide", saveBeat);
+}
+
+let beatBusy = false;
+async function saveBeat(){
+  if (!viewRef || beatBusy) return;
+  beatBusy = true;
+  try {
+    await viewRef.update({
+      lastSeen:      new Date().toISOString(),
+      activeSeconds: activeSec,
+      furthestPage:  furthestPage
+    });
+  } catch (e){ /* best effort */ }
+  beatBusy = false;
+}
+
+/* ===========================================================================
+   5. NAVIGATION AND CONTROLS
+   =========================================================================== */
+function goToPage(n){
+  n = Math.max(1, Math.min(pdfDoc ? pdfDoc.numPages : 1, n));
+  const box = pageBoxes[n - 1];
+  if (!box) return;
+  $("scroll").scrollTop = box.offsetTop - 20;
+  $("bNum").value = n;
+}
+function currentPage(){
+  const top = $("scroll").scrollTop + 60;
+  for (let i = pageBoxes.length - 1; i >= 0; i--)
+    if (pageBoxes[i].offsetTop <= top) return i + 1;
+  return 1;
+}
+
+$("bPrev").addEventListener("click", () => goToPage(currentPage() - 1));
+$("bNext").addEventListener("click", () => goToPage(currentPage() + 1));
+$("bNum").addEventListener("change", e => {
+  const n = parseInt(e.target.value, 10);
+  if (!isNaN(n)) goToPage(n); else e.target.value = currentPage();
+});
+
+function setZoom(next){
+  const keep = currentPage();
+  fitWidth = false;
+  scale = Math.max(MINZOOM, Math.min(3, next));
+  layout();
+  requestAnimationFrame(() => goToPage(keep));
+}
+$("bIn").addEventListener("click",  () => setZoom(scale * 1.15));
+$("bOut").addEventListener("click", () => setZoom(scale / 1.15));
+
+function syncZoomButtons(){
+  $("bOut").disabled = scale <= MINZOOM + 0.001;
+  $("bIn").disabled  = scale >= 3 - 0.001;
+}
+$("bFit").addEventListener("click", () => {
+  const keep = currentPage();
+  fitWidth = true;
+  layout();
+  requestAnimationFrame(() => goToPage(keep));
+});
+
+$("bFull").addEventListener("click", () => {
+  const el = $("shell");
+  if (document.fullscreenElement || document.webkitFullscreenElement){
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  } else {
+    (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+  }
+});
+document.addEventListener("fullscreenchange", () => {
+  if (fitWidth) setTimeout(() => { const k = currentPage(); layout(); goToPage(k); }, 120);
+});
+
+let scrollTick = null;
+$("scroll").addEventListener("scroll", () => {
+  clearTimeout(scrollTick);
+  scrollTick = setTimeout(() => { $("bNum").value = currentPage(); }, 90);
+});
+
+let resizeTick = null;
+window.addEventListener("resize", () => {
+  if (!pdfDoc || !fitWidth) return;
+  /* A phone's on-screen keyboard fires resize without changing the width.
+     Rebuilding then would throw away the box the student is typing in. */
+  if (Math.abs($("scroll").clientWidth - layoutWidth) < 2) return;
+  clearTimeout(resizeTick);
+  resizeTick = setTimeout(() => { const k = currentPage(); layout(); goToPage(k); }, 200);
+});
+
+document.addEventListener("keydown", e => {
+  if (!$("shell").classList.contains("on")) return;
+  if (/^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return;
+  if (e.key === "ArrowRight" || e.key === "PageDown"){ e.preventDefault(); goToPage(currentPage() + 1); }
+  if (e.key === "ArrowLeft"  || e.key === "PageUp"){   e.preventDefault(); goToPage(currentPage() - 1); }
+  if (e.key === "Home"){ e.preventDefault(); goToPage(1); }
+  if (e.key === "End"){  e.preventDefault(); goToPage(pdfDoc.numPages); }
+  if (e.key === "f" || e.key === "F") $("bFull").click();
+});
+
+/* Speed bumps, not DRM — same posture as the video masking.
+   Links are exempt so "open in new tab" still works on them. */
+$("pages").addEventListener("contextmenu", e => {
+  if (!e.target.closest(".pdflink, .ans")) e.preventDefault();
+});
+$("pages").addEventListener("dragstart", e => {
+  if (!e.target.closest(".pdflink, .ans")) e.preventDefault();
+});
+
+/* ===========================================================================
+   5b. WORKSHEET MODE
+   Only runs when the module record has worksheet: true. Answer lines are
+   found in the PDF itself, so a review sheet needs no form fields and no
+   special export — draw lines in Writer and they become typing space.
+   Blanks typed with the underscore key (________) count too. Dashed rules,
+   and rules 1.5 pt or heavier, are decoration (headers, footers) and are
+   never typing space.
+   =========================================================================== */
+
+/* ---- finding the answer lines ---------------------------------------------
+   A line counts when it is a long, thin horizontal stroke (or a hairline
+   filled rectangle, which is how Word draws them) with clear space above it.
+   The clear-space rule is what keeps a heading's underline out: its text sits
+   right on top of it, while an answer line has a writing row of empty paper.
+   Lines stacked at an even spacing with nothing printed between them become
+   one answer space, so typing wraps from line to line like handwriting.
+   Everything here is in page points, y measured down from the top.          */
+function getBlocks(n){
+  if (!blockCache[n]){
+    blockCache[n] = pdfDoc.getPage(n).then(findAnswerLines).catch(e => {
+      console.warn("answer lines, page " + n, e);
+      return [];
+    });
+  }
+  return blockCache[n];
+}
+
+async function findAnswerLines(page){
+  const vp     = page.getViewport({ scale: 1 });
+  const O      = pdfjsLib.OPS;
+  const minLen = Math.max(100, vp.width * 0.22);
+  const ol     = await page.getOperatorList();
+
+  const mul = (m, t) => [
+    m[0]*t[0] + m[2]*t[1],        m[1]*t[0] + m[3]*t[1],
+    m[0]*t[2] + m[2]*t[3],        m[1]*t[2] + m[3]*t[3],
+    m[0]*t[4] + m[2]*t[5] + m[4], m[1]*t[4] + m[3]*t[5] + m[5]
+  ];
+  const at = (m, x, y) =>
+    vp.convertToViewportPoint(m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5]);
+
+  const STROKE = new Set([O.stroke, O.closeStroke, O.fillStroke, O.eoFillStroke,
+                          O.closeFillStroke, O.closeEOFillStroke]);
+  const FILL   = new Set([O.fill, O.eoFill]);
+
+  let ctm = [1, 0, 0, 1, 0, 0];
+  const stack = [];
+  let dashed = false;                 // a dashed rule is a separator, not a blank
+  let lw = 1;                         // stroke width in user space
+  const dashStack = [], lwStack = [];
+  const THICK = 1.5;                  // rules this heavy are decoration (headers, footers)
+  const scaleOf = m => Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])) || 1;
+  let pending = [];
+  const found = [];
+
+  function collect(ops, c){
+    let j = 0, cx = 0, cy = 0;
+    for (const op of ops){
+      if (op === O.moveTo){ cx = c[j++]; cy = c[j++]; }
+      else if (op === O.lineTo){
+        const x = c[j++], y = c[j++];
+        const p = at(ctm, cx, cy), q = at(ctm, x, y);
+        if (Math.abs(p[1] - q[1]) < 0.75 && Math.abs(p[0] - q[0]) >= minLen)
+          pending.push({ kind: "seg", x0: Math.min(p[0], q[0]), x1: Math.max(p[0], q[0]),
+                         y: (p[1] + q[1]) / 2, h: 0 });
+        cx = x; cy = y;
+      }
+      else if (op === O.curveTo){ j += 4; cx = c[j++]; cy = c[j++]; }
+      else if (op === O.curveTo2 || op === O.curveTo3){ j += 2; cx = c[j++]; cy = c[j++]; }
+      else if (op === O.rectangle){
+        const x = c[j++], y = c[j++], w = c[j++], h = c[j++];
+        const pts = [at(ctm, x, y), at(ctm, x + w, y), at(ctm, x + w, y + h), at(ctm, x, y + h)];
+        const xs = pts.map(v => v[0]), ys = pts.map(v => v[1]);
+        const x0 = Math.min(...xs), x1 = Math.max(...xs);
+        const y0 = Math.min(...ys), y1 = Math.max(...ys);
+        if (x1 - x0 >= minLen && y1 - y0 < THICK)
+          pending.push({ kind: "rect", x0, x1, y: (y0 + y1) / 2, h: y1 - y0 });
+        cx = x; cy = y;
+      }
+    }
+  }
+
+  for (let i = 0; i < ol.fnArray.length; i++){
+    const fn = ol.fnArray[i], a = ol.argsArray[i];
+    if      (fn === O.save)                  { stack.push(ctm); dashStack.push(dashed); lwStack.push(lw); }
+    else if (fn === O.restore)               { if (stack.length) ctm = stack.pop(); if (dashStack.length) dashed = dashStack.pop(); if (lwStack.length) lw = lwStack.pop(); }
+    else if (fn === O.setLineWidth)          lw = a[0];
+    else if (fn === O.setGState)             { for (const [k, v] of (a[0] || [])) if (k === "LW") lw = v; }
+    else if (fn === O.setDash)               dashed = !!(a && a[0] && a[0].length);
+    else if (fn === O.transform)             ctm = mul(ctm, a);
+    else if (fn === O.paintFormXObjectBegin) { stack.push(ctm); if (a && a[0]) ctm = mul(ctm, a[0]); }
+    else if (fn === O.paintFormXObjectEnd)   { if (stack.length) ctm = stack.pop(); }
+    else if (fn === O.beginGroup)            { stack.push(ctm); if (a && a[0] && a[0].matrix) ctm = mul(ctm, a[0].matrix); }
+    else if (fn === O.endGroup)              { if (stack.length) ctm = stack.pop(); }
+    else if (fn === O.constructPath)         collect(a[0], a[1]);
+    else if (STROKE.has(fn))                 { if (!dashed && lw * scaleOf(ctm) < THICK) found.push(...pending); pending = []; }
+    else if (FILL.has(fn))                   { found.push(...pending.filter(v => v.kind === "rect")); pending = []; }
+    else if (fn === O.endPath)               pending = [];
+  }
+
+  /* The same rule drawn twice (common in Writer exports) is one rule */
+  found.sort((p, q) => p.y - q.y || p.x0 - q.x0);
+  const rules = [];
+  for (const r of found){
+    const twin = rules.find(u => Math.abs(u.y - r.y) < 1 && Math.abs(u.x0 - r.x0) < 2 && Math.abs(u.x1 - r.x1) < 2);
+    if (!twin) rules.push(r);
+  }
+
+  /* Printed words, by baseline */
+  const tc = await page.getTextContent();
+  const words = [];
+  for (const it of tc.items){
+    if (!it.str || !it.str.trim()) continue;
+    const t = it.transform;
+    const p = vp.convertToViewportPoint(t[4], t[5]);
+    const q = vp.convertToViewportPoint(t[4] + (it.width || 0), t[5]);
+    words.push({ x0: Math.min(p[0], q[0]), x1: Math.max(p[0], q[0]), y: p[1], it });
+  }
+
+  /* Typed blanks. "Answer: ________" made with the underscore key is text,
+     not a drawn line, so the stroke search above never sees it. Each run of
+     four or more underscores becomes a one-line answer space of its own. */
+  const blanks = findUnderscoreBlanks(words);
+
+  if (!rules.length) return finishBlocks(blanks);
+
+  const overlaps = (u, v) => u.x0 < v.x1 - 1 && v.x0 < u.x1 - 1;
+
+  for (const r of rules){
+    let clear = r.y;
+    for (const w of words) if (w.y < r.y - 0.5 && overlaps(w, r)) clear = Math.min(clear, r.y - w.y);
+    for (const o of rules) if (o !== r && o.y < r.y - 0.5 && overlaps(o, r)) clear = Math.min(clear, r.y - o.y);
+    r.clear = clear;
+  }
+
+  const blocks = [];
+  for (const r of rules.filter(v => v.clear >= 14)){
+    const home = blocks.slice().reverse().find(b => {
+      const last = b.ys[b.ys.length - 1];
+      const gap  = r.y - last;
+      return Math.abs(r.x0 - b.x0) <= 4 && Math.abs(r.x1 - b.x1) <= 4
+          && gap >= 12 && gap <= 40
+          && (b.ys.length < 2 || Math.abs(gap - b.step) <= 3)
+          && !words.some(w => w.y > last + 0.5 && w.y < r.y - 0.5 && overlaps(w, r));
+    });
+    if (home){
+      home.ys.push(r.y);
+      home.step = (r.y - home.ys[0]) / (home.ys.length - 1);
+    } else {
+      blocks.push({ x0: r.x0, x1: r.x1, ys: [r.y], step: 0, clear: r.clear });
+    }
+  }
+
+  return finishBlocks(blocks.concat(blanks));
+}
+
+function finishBlocks(blocks){
+  blocks.sort((p, q) => p.ys[0] - q.ys[0] || p.x0 - q.x0);
+  for (const b of blocks){
+    b.L   = b.L || (b.ys.length > 1 ? b.step : Math.min(b.clear, 26));   // one writing row
+    b.top = b.ys[0] - Math.max(6, Math.min(b.L - 2, b.clear - 4));
+  }
+  return blocks;
+}
+
+/* Where each underscore run sits inside its text item. pdf.js gives only the
+   item's start and total width, so the run is located by measuring the
+   string in a similar font and scaling that to the item's real width.     */
+const blankCtx = document.createElement("canvas").getContext("2d");
+function findUnderscoreBlanks(words){
+  const out = [];
+  for (const w of words){
+    const it = w.it, str = it.str;
+    if (!str.includes("____")) continue;
+    const t  = it.transform;
+    const fs = Math.hypot(t[2], t[3]) || Math.hypot(t[0], t[1]) || 12;
+    blankCtx.font = "100px Arial, Helvetica, sans-serif";
+    const full = blankCtx.measureText(str).width || 1;
+    const k    = (w.x1 - w.x0) / full;
+    const re   = /_{4,}/g;
+    let m;
+    while ((m = re.exec(str))){
+      const x0 = w.x0 + blankCtx.measureText(str.slice(0, m.index)).width * k;
+      const x1 = x0 + blankCtx.measureText(m[0]).width * k;
+      if (x1 - x0 < 12) continue;
+      const y  = w.y + fs * 0.1;                       // the underscore rule
+      const b  = { x0, x1 };
+      let clear = fs * 2;
+      for (const o of words){
+        if (o === w || o.y >= w.y - fs * 0.6) continue;  // same line or below
+        if (o.x0 < x1 - 1 && x0 < o.x1 - 1) clear = Math.min(clear, y - o.y);
+      }
+      out.push({ x0, x1, ys: [y], step: 0, clear: Math.max(clear, fs * 1.2),
+                 L: Math.max(16, Math.min(26, fs * 1.6)), blank: true });
+    }
+  }
+  /* A long blank is sometimes split across two text items — rejoin it */
+  out.sort((p, q) => p.ys[0] - q.ys[0] || p.x0 - q.x0);
+  const joined = [];
+  for (const b of out){
+    const prev = joined[joined.length - 1];
+    if (prev && Math.abs(prev.ys[0] - b.ys[0]) < 1.5 && b.x0 - prev.x1 < 4){
+      prev.x1 = Math.max(prev.x1, b.x1);
+      prev.clear = Math.min(prev.clear, b.clear);
+    } else joined.push(b);
+  }
+  return joined;
+}
+
+/* ---- type geometry --------------------------------------------------------
+   Typed text sits on the line the way handwriting does. The textarea's rows
+   are exactly one line spacing tall, and its top is shifted so each row's
+   baseline lands just above its rule. s = pixels per page point.            */
+const metricCtx = document.createElement("canvas").getContext("2d");
+function fontMetrics(px){
+  metricCtx.font = px + "px " + ANS_FONT;
+  const m = metricCtx.measureText("Hg");
+  const A = m.fontBoundingBoxAscent, D = m.fontBoundingBoxDescent;
+  return (A > 0 && D > 0) ? { A, D } : { A: px * 0.93, D: px * 0.24 };
+}
+function answerType(b, s, shrink){
+  const L = b.L * s;
+  const F = Math.max(8, Math.min(13, b.L * 0.5)) * s * shrink;
+  const { A, D } = fontMetrics(F);
+  return { L, F, A, D, g: D * 0.8 + 0.6 * s };
+}
+function placeTextarea(ta, b, s, boxTop, shrink){
+  const t = answerType(b, s, shrink);
+  const firstRowTop = b.ys[0] * s - t.g - t.L / 2 - (t.A - t.D) / 2;
+  ta.style.left       = 4 * s + "px";
+  ta.style.width      = (b.x1 - b.x0 - 4) * s + "px";
+  ta.style.top        = (firstRowTop - boxTop) + "px";
+  ta.style.height     = b.ys.length * t.L + "px";
+  ta.style.fontFamily = ANS_FONT;
+  ta.style.fontSize   = t.F + "px";
+  ta.style.lineHeight = t.L + "px";
+}
+const overfull = ta => ta.scrollHeight > ta.clientHeight + 1;
+
+/* ---- the typing layer ----------------------------------------------------- */
+async function addAnswerLayer(box, n){
+  const blocks = await getBlocks(n);
+  if (!blocks.length || !box.isConnected) return;
+
+  const s = scale;
+  const layer = document.createElement("div");
+  layer.className = "anslayer";
+  layer.style.height = Math.round(baseSizes[n - 1].h * s) + "px";
+  box.appendChild(layer);
+
+  blocks.forEach((b, k) => {
+    const key  = n + "." + (k + 1);
+    const pad  = 2 * s;
+    const top  = b.top * s;
+    const wrap = document.createElement("div");
+    wrap.className = "ans";
+    wrap.style.cssText =
+      `left:${b.x0 * s - pad}px;top:${top}px;` +
+      `width:${(b.x1 - b.x0) * s + 2 * pad}px;` +
+      `height:${b.ys[b.ys.length - 1] * s + 2 - top}px;`;
+
+    const ta = document.createElement("textarea");
+    ta.spellcheck = true;
+    ta.setAttribute("autocomplete", "off");
+    ta.setAttribute("aria-label",
+      "Answer space " + (k + 1) + " on page " + n + ", " + b.ys.length +
+      (b.ys.length === 1 ? " line" : " lines"));
+    ta.value = answers[key] || "";
+    wrap.appendChild(ta);
+    layer.appendChild(wrap);
+
+    /* Existing text that no longer fits (a different zoom can change where
+       words wrap) gets slightly smaller type rather than a hidden last line */
+    let shrink = 1;
+    placeTextarea(ta, b, s, top, shrink);
+    while (ta.value && overfull(ta) && shrink > 0.7){
+      shrink *= 0.92;
+      placeTextarea(ta, b, s, top, shrink);
+    }
+
+    let before = { value: ta.value, start: 0, end: 0 };
+    ta.addEventListener("beforeinput", () => {
+      before = { value: ta.value, start: ta.selectionStart, end: ta.selectionEnd };
+    });
+
+    /* Paper has only so many lines. Typing past the last one is refused,
+       and the space flashes, instead of scrolling words out of sight. */
+    ta.addEventListener("input", () => {
+      if (overfull(ta)){
+        ta.value = before.value;
+        ta.setSelectionRange(before.start, before.end);
+        wrap.classList.remove("full"); void wrap.offsetWidth; wrap.classList.add("full");
+        clearTimeout(wrap._flash);
+        wrap._flash = setTimeout(() => wrap.classList.remove("full"), 700);
+        flashNote("No more room on those lines", true);
+        return;
+      }
+      if (ta.value) answers[key] = ta.value; else delete answers[key];
+      dirty = true;
+      saveAnswers();
+    });
+
+    wrap.addEventListener("mousedown", e => {
+      if (e.target !== wrap) return;
+      e.preventDefault();
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    });
+  });
+}
+
+/* ---- keeping answers in this browser -------------------------------------- */
+function setNote(text, warn){
+  const el = $("wsNote");
+  el.textContent = text;
+  el.classList.toggle("warn", !!warn);
+}
+function restingNote(){
+  setNote(canStore ? "Answers save in this browser"
+                   : "This browser can\u2019t save answers \u2014 print before you close",
+          !canStore);
+}
+function flashNote(text, warn){
+  setNote(text, warn);
+  clearTimeout(noteTick);
+  noteTick = setTimeout(restingNote, 2200);
+}
+
+function startAnswers(sid){
+  answerKey = "readAnswers:" + (localPdf ? "preview:" + localPdf.name : docId) + ":" + sid;
+  answers = {};
+  dirty = false;
+  try {
+    const raw = localStorage.getItem(answerKey);
+    if (raw){
+      const saved = JSON.parse(raw);
+      if (saved && saved.answers && typeof saved.answers === "object") answers = saved.answers;
+    }
+    localStorage.setItem("readAnswers:probe", "1");
+    localStorage.removeItem("readAnswers:probe");
+    canStore = true;
+  } catch (e){
+    canStore = false;
+  }
+  restingNote();
+}
+
+/* Every accepted keystroke is written straight away. An earlier version
+   waited half a second and relied on a last save when the page closed, but
+   quitting the whole browser doesn't reliably deliver that close event, and
+   whatever was typed in the final moment was lost.
+
+   Nothing is written unless the student actually changed something in this
+   session. If the browser hands back an out-of-date copy when it's reopened
+   (it can, when it hasn't finished writing to disk from the last session),
+   merely opening and closing the reading must not save that stale copy over
+   the good one. */
+function saveAnswers(){
+  if (!worksheet || !answerKey || !canStore || !dirty) return;
+  try {
+    if (Object.keys(answers).length){
+      localStorage.setItem(answerKey, JSON.stringify({
+        title: (record && record.title) || "",
+        saved: new Date().toISOString(),
+        answers
+      }));
+    } else {
+      localStorage.removeItem(answerKey);
+    }
+  } catch (e){
+    setNote("Couldn\u2019t save \u2014 print before you close", true);
+  }
+}
+window.addEventListener("pagehide", saveAnswers);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") saveAnswers();
+});
+
+/* ---- clear ----------------------------------------------------------------- */
+function askClear(on){
+  $("wsMain").hidden = on;
+  $("wsAsk").hidden  = !on;
+  (on ? $("wsKeep") : $("bClear")).focus();
+}
+$("bClear").addEventListener("click", () => askClear(true));
+$("wsKeep").addEventListener("click", () => askClear(false));
+$("wsErase").addEventListener("click", () => {
+  answers = {};
+  document.querySelectorAll(".ans textarea").forEach(t => { t.value = ""; });
+  dirty = true;
+  saveAnswers();
+  askClear(false);
+  flashNote("Answers cleared");
+});
+
+/* ---- printing ---------------------------------------------------------------
+   Each page is drawn fresh at print resolution with the typed answers painted
+   onto it, then handed to the browser as one image per sheet. What prints is
+   exactly the page, the answers and the footer stamp — never the toolbar.   */
+function wrapText(ctx, text, width){
+  const out = [];
+  for (const para of String(text).split("\n")){
+    const tokens = para.match(/\S+|\s+/g) || [];
+    let line = "";
+    for (const tok of tokens){
+      if (/^\s/.test(tok)){ line += tok; continue; }
+      if (ctx.measureText(line + tok).width <= width){ line += tok; continue; }
+      if (line.trim()) out.push(line.replace(/\s+$/, ""));
+      line = "";
+      if (ctx.measureText(tok).width <= width){ line = tok; continue; }
+      let piece = "";
+      for (const ch of tok){
+        if (piece && ctx.measureText(piece + ch).width > width){ out.push(piece); piece = ch; }
+        else piece += ch;
+      }
+      line = piece;
+    }
+    out.push(line.replace(/\s+$/, ""));
+  }
+  return out;
+}
+
+function drawAnswers(ctx, blocks, n, S){
+  blocks.forEach((b, k) => {
+    const text = answers[n + "." + (k + 1)];
+    if (!text) return;
+    const rows  = b.ys.length;
+    const width = (b.x1 - b.x0 - 4) * S;
+    let shrink = 1, t, lines;
+    for (;;){
+      t = answerType(b, S, shrink);
+      ctx.font = t.F + "px " + ANS_FONT;
+      lines = wrapText(ctx, text, width);
+      if (lines.length <= rows || shrink <= 0.7) break;
+      shrink *= 0.92;
+    }
+    ctx.save();
+    ctx.fillStyle = ANS_INK;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+    lines.slice(0, rows).forEach((ln, r) =>
+      ctx.fillText(ln, (b.x0 + 2) * S, b.ys[r] * S - t.g));
+    ctx.restore();
+  });
+}
+
+function clearPrint(){
+  document.body.classList.remove("print-ready");
+  $("printRoot").innerHTML = "";
+  printUrls.forEach(u => URL.revokeObjectURL(u));
+  printUrls = [];
+}
+window.addEventListener("afterprint", () => setTimeout(clearPrint, 0));
+
+async function printReading(){
+  if (!worksheet || !pdfDoc || printing) return;
+  printing = true;
+  saveAnswers();
+  clearPrint();
+
+  const btn  = $("bPrint");
+  const root = $("printRoot");
+  const S    = PRINT_SCALE;
+  btn.disabled = true;
+
+  try {
+    for (let n = 1; n <= pdfDoc.numPages; n++){
+      btn.textContent = "Preparing " + n + " of " + pdfDoc.numPages;
+      const page  = await pdfDoc.getPage(n);
+      const vp    = page.getViewport({ scale: S });
+      const pageH = Math.round(vp.height);
+      const band  = record.watermark !== false ? Math.round(BAND * S) : 0;
+
+      const canvas = document.createElement("canvas");
+      canvas.width  = Math.round(vp.width);
+      canvas.height = pageH + band;
+      const ctx = canvas.getContext("2d", { alpha: false });
+      ctx.fillStyle = "#FFFFFF";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      if (band) stampFooter(ctx, canvas.width, pageH, canvas.height, S);
+      drawAnswers(ctx, await getBlocks(n), n, S);
+
+      const blob = await new Promise((ok, no) =>
+        canvas.toBlob(b => b ? ok(b) : no(new Error("page " + n + " image failed")), "image/png"));
+      canvas.width = canvas.height = 0;
+
+      const url = URL.createObjectURL(blob);
+      printUrls.push(url);
+      const sheet = document.createElement("div");
+      sheet.className = "pp";
+      const img = new Image();
+      img.alt = "";
+      img.src = url;
+      sheet.appendChild(img);
+      root.appendChild(sheet);
+      try { await img.decode(); } catch (e){}
+    }
+
+    btn.textContent = "Print";
+    document.body.classList.add("print-ready");
+    await new Promise(r => setTimeout(r, 60));
+    window.print();
+  } catch (err){
+    console.error(err);
+    clearPrint();
+    flashNote("Couldn\u2019t prepare the printout \u2014 try again", true);
+  } finally {
+    printing = false;
+    btn.disabled = false;
+    btn.textContent = "Print";
+  }
+}
+$("bPrint").addEventListener("click", printReading);
+
+/* Ctrl+P / Cmd+P goes through the same path as the button */
+document.addEventListener("keydown", e => {
+  if (!worksheet || !$("shell").classList.contains("on")) return;
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "p" || e.key === "P")){
+    e.preventDefault();
+    printReading();
+  }
+}, true);
+
+/* ===========================================================================
+   6. START
+   =========================================================================== */
+const known = docId ? MODULES[docId] : null;
+let preloaded = null;
+
+function dressGate(rec){
+  $("gateTitle").textContent = rec.title || "Reading module";
+
+  /* Name what the student is actually being asked for. The password half is
+     tied to the same value that decides whether the field is shown at all, so
+     the sentence can't promise a box that isn't there. */
+  const asks = rec.password
+    ? "Enter your name and ID, and the module password, to open the reading."
+    : "Enter your name and ID to open the reading.";
+  $("gateSub").textContent = rec.course ? rec.course + ". " + asks : asks;
+
+  if (!rec.password) $("fPw").closest(".field").style.display = "none";
+}
+
+if (known){
+  preloaded = known;
+  dressGate(known);
+} else if (!docId){
+  /* Opened with no ?doc= code. On your own machine that's the preview mode;
+     for a student it means the Canvas link was incomplete. */
+  if (location.protocol === "file:"){
+    $("gateTitle").textContent = "Preview";
+    $("gateSub").textContent   = "Pick a PDF below to see how a module will look. Name and ID show up in the page footer.";
+    $("localRow").style.display = "block";
+    $("fPw").closest(".field").style.display = "none";
+  } else {
+    $("gateTitle").textContent = "Link incomplete";
+    $("gateSub").textContent   = "This link is missing its module code. Open the reading from the link posted in Canvas.";
+  }
+} else if (useFirestore()){
+  /* Fetch the record now so the login card can show the real title and only
+     ask for a password when the module actually has one. */
+  $("gateSub").textContent = "Loading\u2026";
+  (async () => {
+    try {
+      if (!db){ firebase.initializeApp(firebaseConfig); db = firebase.firestore(); }
+      const snap = await db.collection(COLLECTION).doc(docId).get();
+      if (!snap.exists){
+        $("gateTitle").textContent = "Reading not found";
+        $("gateSub").textContent   = "No module matches the code " + docId + ".";
+        $("gateGo").disabled = true;
+        return;
+      }
+      preloaded = snap.data();
+      dressGate(preloaded);
+    } catch (e){
+      console.error(e);
+      $("gateSub").textContent =
+        "Couldn't reach the database. Check your connection and reload.";
+    }
+  })();
+}
+
+$("fFile").addEventListener("change", async e => {
+  const f = e.target.files[0];
+  if (!f) { localPdf = null; return; }
+  localPdf = { name: f.name, data: new Uint8Array(await f.arrayBuffer()) };
+  $("gateMsg").textContent = "";
+});
+
+$("fName").focus();
+</script>
+</body>
+</html>

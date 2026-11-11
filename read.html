@@ -26,6 +26,15 @@
   Records saved before the switch was split carry only worksheet: true, which
   is read as both on. See workModes().
 
+  HIDE ON FOCUS LOSS (hideOnBlur: true on the record, set in TeacherRead)
+  The pages are covered whenever the browser window stops being the active
+  window or the tab is hidden, and come back when the student returns. Screen
+  capture tools that take focus (Snipping Tool and the like) capture the
+  cover instead of the page. The cover also goes up while the Windows key or
+  Alt is held (Cmd+Shift on a Mac), which catches Win+PrtScn and Alt+PrtScn.
+  It is a deterrent only: a bare PrtScn press, a capture tool started ahead
+  of time, or a phone camera is not stopped. Absent = off.
+
   URL:  read.html?doc=CH01
 
   FIRESTORE  — collection: documents,  document id = the ?doc= value
@@ -40,6 +49,7 @@
     typing:           false,     // optional, absent = falls back to worksheet
     printing:         false,     // optional, absent = falls back to worksheet
     worksheet:        false,     // legacy: true = typing + printing
+    hideOnBlur:       false,     // optional, absent = false
     availability: {              // optional, both blank = always open
       start: "2026-09-01T00:00",
       stop:  "2026-12-20T23:59"
@@ -311,6 +321,17 @@ body:not(.can-print) #bPrint{display:none;}
 }
 #printRoot{display:none;}
 
+/* Cover shown while the window isn't active (hideOnBlur) */
+#veil{
+  position:absolute;inset:0;z-index:40;display:none;
+  align-items:center;justify-content:center;text-align:center;padding:30px;
+  background:var(--ink);color:var(--type);
+  font-family:var(--serif);font-size:19px;line-height:1.6;cursor:pointer;
+}
+#veil small{display:block;margin-top:8px;font-family:var(--sans);font-size:13px;color:var(--muted);}
+body.veiled #veil{display:flex;}
+body.veiled #pages{visibility:hidden;}
+
 /* ---------------------------------------------------------------- foot --- */
 .foot{
   display:flex;align-items:center;justify-content:center;
@@ -413,6 +434,10 @@ body:not(.can-print) #bPrint{display:none;}
         <input id="fPrint" type="checkbox" style="width:16px;height:16px;accent-color:var(--brass)">
         Allow printing
       </label>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px;color:var(--type)">
+        <input id="fGuard" type="checkbox" style="width:16px;height:16px;accent-color:var(--brass)">
+        Hide the pages when this window isn't active
+      </label>
     </div>
 
     <button class="gate-btn" id="gateGo">Open reading</button>
@@ -469,6 +494,11 @@ body:not(.can-print) #bPrint{display:none;}
   </div>
 
   <div class="foot" id="bFoot"></div>
+
+  <div id="veil" role="status">
+    <div>This reading is hidden while its window isn’t active.
+      <small>Click here to continue reading.</small></div>
+  </div>
 </div>
 
 <!-- Filled only while a reading is being printed -->
@@ -523,6 +553,7 @@ let layoutWidth = 0;       // scroll width the current layout was built for
 
 /* Typing on answer lines (answers kept locally) and printing are separate
    switches. `printing` below is the "a printout is being built" flag. */
+let hideOnBlur = false;    // cover the pages while the window isn't active
 let canType    = false;
 let canPrint   = false;
 let answers    = {};       // "page.space" -> text, e.g. "3.2"
@@ -656,6 +687,8 @@ async function openReading(){
                                 : "Print the pages (Ctrl+P)";
     setNote("");
     if (canType) startAnswers(sid || "name:" + name.toLowerCase());
+    hideOnBlur = record.hideOnBlur === true;
+    setVeil(false);
 
     $("bTitle").textContent = record.title || "Reading module";
     $("bWho").textContent   = [record.course, name, sid].filter(Boolean).join("  \u00B7  ");
@@ -698,7 +731,8 @@ async function resolveModule(){
     course:  "Local preview",
     pdfData: localPdf.data,
     typing:   $("fType").checked,
-    printing: $("fPrint").checked
+    printing: $("fPrint").checked,
+    hideOnBlur: $("fGuard").checked
   };
 
   if (preloaded) return preloaded;
@@ -1408,6 +1442,60 @@ function restingNote(){
                      (canPrint ? " \u2014 print before you close" : ""),
           !canStore);
 }
+
+/* ---- hide on focus loss ------------------------------------------------------
+   Covers the pages whenever this window stops being the active one. The cover
+   goes up at once on blur; it comes down on focus or on a click. */
+function setVeil(on){
+  document.body.classList.toggle("veiled", !!on && hideOnBlur);
+}
+window.addEventListener("blur",  () => { saveAnswers(); setVeil(true); });
+window.addEventListener("focus", () => { guardKey = false; setVeil(false); });
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") setVeil(true);
+  else if (document.hasFocus()) setVeil(false);
+});
+$("veil").addEventListener("click", () => { guardKey = false; window.focus(); setVeil(false); });
+
+/* Whole-screen captures (Win+PrtScn, Alt+PrtScn, Cmd+Shift+3/4/5 on a Mac)
+   never take focus away, so blur can't catch them. The modifier key goes down
+   first, though, and the page does hear that — so the cover goes up the
+   moment the Windows key or Alt is pressed (Cmd+Shift on a Mac) and stays for
+   a second after it is let go. A bare PrtScn press can't be seen coming; all
+   that can be done is to wipe the clipboard copy afterwards, where the
+   browser allows it. */
+let guardKey = false, guardTick = null;
+const IS_MAC = /Mac|iPhone|iPad/i.test(navigator.platform || "");
+function captureModifier(e){
+  if (IS_MAC) return e.metaKey && e.shiftKey;
+  return e.key === "Meta" || e.key === "OS" || e.key === "Alt";
+}
+function guardRelease(){
+  clearTimeout(guardTick);
+  guardTick = setTimeout(() => {
+    guardKey = false;
+    if (document.hasFocus()) setVeil(false);
+  }, 1000);
+}
+document.addEventListener("keydown", e => {
+  if (!hideOnBlur || !$("shell").classList.contains("on")) return;
+  if (captureModifier(e) || e.key === "PrintScreen"){
+    guardKey = true;
+    clearTimeout(guardTick);
+    setVeil(true);
+  }
+}, true);
+document.addEventListener("keyup", e => {
+  if (!hideOnBlur || !$("shell").classList.contains("on")) return;
+  if (e.key === "PrintScreen"){
+    guardKey = true;
+    setVeil(true);
+    try { navigator.clipboard.writeText("").catch(() => {}); } catch (err){}
+    guardRelease();
+  } else if (guardKey){
+    guardRelease();
+  }
+}, true);
 
 /* Which of typing / printing this record allows. Records saved before the
    switch was split carry only `worksheet`, which meant both. */

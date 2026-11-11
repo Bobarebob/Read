@@ -26,6 +26,12 @@
   Records saved before the switch was split carry only worksheet: true, which
   is read as both on. See workModes().
 
+  ALLOWED STUDENT IDS (allowIds on the record, set in TeacherRead)
+  When the record carries a list, the reading opens only for a student ID on
+  it. The list travels inside the record and is checked here in the browser;
+  there is no second lookup. It is scrambled, not encrypted (see packIds).
+  Absent or blank = no check, exactly as before.
+
   HIDE ON FOCUS LOSS (hideOnBlur: true on the record, set in TeacherRead)
   The pages are covered whenever the browser window stops being the active
   window or the tab is hidden, and come back when the student returns. Screen
@@ -50,6 +56,7 @@
     printing:         false,     // optional, absent = falls back to worksheet
     worksheet:        false,     // legacy: true = typing + printing
     hideOnBlur:       false,     // optional, absent = false
+    allowIds:         "",        // optional, scrambled ID list; blank = no check
     availability: {              // optional, both blank = always open
       start: "2026-09-01T00:00",
       stop:  "2026-12-20T23:59"
@@ -602,6 +609,40 @@ $("gateGo").addEventListener("click", openReading);
 
 function fail(msg){ $("gateMsg").textContent = msg; $("gateGo").disabled = false; }
 
+/* Allowed-ID list, kept inside the reading's own record (allowIds). It is
+   scrambled with the module code so the numbers aren't sitting in the record
+   as plain text, but this is NOT encryption: the reader has to be able to
+   undo it, so anyone determined can too. It holds ID numbers only, never
+   names. TeacherRead and read.html must use the same two functions. */
+function idStream(code){
+  let h = 2166136261;
+  for (const ch of "tr-ids|" + code){ h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }
+  let a = h >>> 0;
+  return () => {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) & 255;
+  };
+}
+function packIds(ids, code){
+  const next = idStream(code), text = "ids1\n" + ids.join("\n");
+  let out = "";
+  for (let i = 0; i < text.length; i++) out += String.fromCharCode((text.charCodeAt(i) & 255) ^ next());
+  return btoa(out);
+}
+/* [] = no list, null = a list is there but can't be read */
+function unpackIds(packed, code){
+  if (!packed) return [];
+  try {
+    const raw = atob(packed), next = idStream(code);
+    let text = "";
+    for (let i = 0; i < raw.length; i++) text += String.fromCharCode(raw.charCodeAt(i) ^ next());
+    if (!text.startsWith("ids1\n")) return null;
+    return text.slice(5).split("\n").filter(Boolean);
+  } catch (e){ return null; }
+}
+
 /* Student ID rule, set per reading in TeacherRead. A reading saved before the
    setting existed has no idRule and gets 7 digits, enforced. The local
    preview has no record, so the ID is optional there. */
@@ -665,6 +706,16 @@ async function openReading(){
     if (record.password && String(record.password) !== pw)
       return reset(pw ? "That password doesn't match this module."
                       : "This module needs a password.");
+
+    if (record.allowIds && !localPdf){
+      const allowed = unpackIds(record.allowIds, docId);
+      if (!allowed)
+        return reset("Couldn\u2019t check the class list for this reading. Let your instructor know.");
+      if (!sid) return reset("Enter your student ID. This reading checks it against the class list.");
+      if (!allowed.includes(sid.toUpperCase()))
+        return reset("That student ID isn\u2019t on the class list for this reading. Check the "
+                   + "number, including any leading zero. If it\u2019s right, contact your instructor.");
+    }
 
     const win = windowState(record.availability);
     if (win) return reset(win);

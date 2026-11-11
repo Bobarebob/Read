@@ -14,12 +14,17 @@
   so there is no browser PDF toolbar, no download button, no print button and
   no "open in new tab" popout to mask.
 
-  WORKSHEET MODE (worksheet: true on the record, set in TeacherRead)
-  Answer lines in the PDF are found automatically and become typing areas.
-  Students get a Print button that prints the pages with what they typed, and
-  their answers are kept in their own browser (localStorage, one entry per
-  module code + student ID). Nothing typed is ever sent to Firestore.
-  Without the switch the module stays screen-only, exactly as before.
+  TYPING AND PRINTING (two separate switches on the record, set in TeacherRead)
+  typing: true    Answer lines in the PDF are found automatically and become
+                  typing areas. Answers are kept in the student's own browser
+                  (localStorage, one entry per module code + student ID).
+                  Nothing typed is ever sent to Firestore.
+  printing: true  Students get a Print button that prints the pages, with
+                  whatever they typed if typing is also on.
+  Either can be on without the other, so a reading can be typed on but not
+  printed. With both off the module stays screen-only.
+  Records saved before the switch was split carry only worksheet: true, which
+  is read as both on. See workModes().
 
   URL:  read.html?doc=CH01
 
@@ -32,7 +37,9 @@
     password:         "orion",                              // required
     copyrightNotice:  "",        // optional, blank = default constant below
     watermark:        true,      // optional, absent = true
-    worksheet:        false,     // optional, absent = false (typing + printing)
+    typing:           false,     // optional, absent = falls back to worksheet
+    printing:         false,     // optional, absent = falls back to worksheet
+    worksheet:        false,     // legacy: true = typing + printing
     availability: {              // optional, both blank = always open
       start: "2026-09-01T00:00",
       stop:  "2026-12-20T23:59"
@@ -268,6 +275,8 @@ button{font-family:inherit;}
 .rail::-webkit-scrollbar{display:none;}
 .ws{display:none;align-items:center;gap:6px;}
 body.worksheet .ws{display:flex;}
+body:not(.can-type) #bClear{display:none;}
+body:not(.can-print) #bPrint{display:none;}
 .ws-group{display:flex;align-items:center;gap:6px;}
 .ws-group[hidden]{display:none;}
 .ws-note{font-size:12px;color:var(--muted);white-space:nowrap;margin-right:4px;}
@@ -345,8 +354,8 @@ body.worksheet .ws{display:flex;}
   /* Worksheets print only through the toolbar button, which builds the pages
      first. The browser's own Print menu can't wait for that, so it gets a
      pointer to the button instead of a blank sheet. */
-  body.worksheet::after{
-    content:"To print this worksheet, use the Print button in the reader\2019s toolbar.";
+  body.can-print::after{
+    content:"To print this reading, use the Print button in the reader\2019s toolbar.";
   }
   body.print-ready::after{content:none;display:none !important;}
   body.print-ready #printRoot{display:block !important;}
@@ -397,8 +406,12 @@ body.worksheet .ws{display:flex;}
       <input id="fFile" type="file" accept="application/pdf"
              style="padding:8px;font-size:13px;color:var(--muted)">
       <label style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:var(--type)">
-        <input id="fWork" type="checkbox" style="width:16px;height:16px;accent-color:var(--brass)">
-        Treat it as a worksheet (typing and printing)
+        <input id="fType" type="checkbox" style="width:16px;height:16px;accent-color:var(--brass)">
+        Allow typing on the answer lines
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px;color:var(--type)">
+        <input id="fPrint" type="checkbox" style="width:16px;height:16px;accent-color:var(--brass)">
+        Allow printing
       </label>
     </div>
 
@@ -458,7 +471,7 @@ body.worksheet .ws{display:flex;}
   <div class="foot" id="bFoot"></div>
 </div>
 
-<!-- Filled only while a worksheet is being printed -->
+<!-- Filled only while a reading is being printed -->
 <div id="printRoot" aria-hidden="true"></div>
 
 <script>
@@ -508,8 +521,10 @@ let observer = null;
 let localPdf = null;       // {name, data} when previewing a file from disk
 let layoutWidth = 0;       // scroll width the current layout was built for
 
-/* Worksheet mode — typing on answer lines, printing, answers kept locally */
-let worksheet  = false;
+/* Typing on answer lines (answers kept locally) and printing are separate
+   switches. `printing` below is the "a printout is being built" flag. */
+let canType    = false;
+let canPrint   = false;
 let answers    = {};       // "page.space" -> text, e.g. "3.2"
 let answerKey  = "";       // localStorage key: module code + student ID
 let canStore   = true;
@@ -631,9 +646,16 @@ async function openReading(){
       (record.course ? `  \u00B7  ${record.course}` : "") +
       `  \u00B7  Not for redistribution`;
 
-    worksheet = record.worksheet === true;
-    document.body.classList.toggle("worksheet", worksheet);
-    if (worksheet) startAnswers(sid || "name:" + name.toLowerCase());
+    const wm = workModes(record);
+    canType  = wm.typing;
+    canPrint = wm.printing;
+    document.body.classList.toggle("worksheet", canType || canPrint);  // shows the toolbar group
+    document.body.classList.toggle("can-type",  canType);
+    document.body.classList.toggle("can-print", canPrint);
+    $("bPrint").title = canType ? "Print the pages with your answers (Ctrl+P)"
+                                : "Print the pages (Ctrl+P)";
+    setNote("");
+    if (canType) startAnswers(sid || "name:" + name.toLowerCase());
 
     $("bTitle").textContent = record.title || "Reading module";
     $("bWho").textContent   = [record.course, name, sid].filter(Boolean).join("  \u00B7  ");
@@ -675,7 +697,8 @@ async function resolveModule(){
     title:   localPdf.name.replace(/\.pdf$/i, ""),
     course:  "Local preview",
     pdfData: localPdf.data,
-    worksheet: $("fWork").checked
+    typing:   $("fType").checked,
+    printing: $("fPrint").checked
   };
 
   if (preloaded) return preloaded;
@@ -807,7 +830,7 @@ async function renderPage(n){
     box.innerHTML = "";
     box.appendChild(canvas);
     await addLinkLayer(box, page, n);
-    if (worksheet) await addAnswerLayer(box, n);
+    if (canType) await addAnswerLayer(box, n);
     box.classList.remove("pending");
     box.dataset.done = "1";
   } catch (err){
@@ -1062,7 +1085,7 @@ $("pages").addEventListener("dragstart", e => {
 
 /* ===========================================================================
    5b. WORKSHEET MODE
-   Only runs when the module record has worksheet: true. Answer lines are
+   Only runs when typing is on for the module record. Answer lines are
    found in the PDF itself, so a review sheet needs no form fields and no
    special export — draw lines in Writer and they become typing space.
    Blanks typed with the underscore key (________) count too. Dashed rules,
@@ -1379,9 +1402,21 @@ function setNote(text, warn){
   el.classList.toggle("warn", !!warn);
 }
 function restingNote(){
+  if (!canType) return setNote("");
   setNote(canStore ? "Answers save in this browser"
-                   : "This browser can\u2019t save answers \u2014 print before you close",
+                   : "This browser can\u2019t save answers" +
+                     (canPrint ? " \u2014 print before you close" : ""),
           !canStore);
+}
+
+/* Which of typing / printing this record allows. Records saved before the
+   switch was split carry only `worksheet`, which meant both. */
+function workModes(r){
+  const legacy = !!r && r.worksheet === true;
+  return {
+    typing:   r && typeof r.typing   === "boolean" ? r.typing   : legacy,
+    printing: r && typeof r.printing === "boolean" ? r.printing : legacy
+  };
 }
 function flashNote(text, warn){
   setNote(text, warn);
@@ -1419,7 +1454,7 @@ function startAnswers(sid){
    merely opening and closing the reading must not save that stale copy over
    the good one. */
 function saveAnswers(){
-  if (!worksheet || !answerKey || !canStore || !dirty) return;
+  if (!canType || !answerKey || !canStore || !dirty) return;
   try {
     if (Object.keys(answers).length){
       localStorage.setItem(answerKey, JSON.stringify({
@@ -1431,7 +1466,7 @@ function saveAnswers(){
       localStorage.removeItem(answerKey);
     }
   } catch (e){
-    setNote("Couldn\u2019t save \u2014 print before you close", true);
+    setNote("Couldn\u2019t save" + (canPrint ? " \u2014 print before you close" : ""), true);
   }
 }
 window.addEventListener("pagehide", saveAnswers);
@@ -1516,7 +1551,7 @@ function clearPrint(){
 window.addEventListener("afterprint", () => setTimeout(clearPrint, 0));
 
 async function printReading(){
-  if (!worksheet || !pdfDoc || printing) return;
+  if (!canPrint || !pdfDoc || printing) return;
   printing = true;
   saveAnswers();
   clearPrint();
@@ -1543,7 +1578,7 @@ async function printReading(){
 
       await page.render({ canvasContext: ctx, viewport: vp }).promise;
       if (band) stampFooter(ctx, canvas.width, pageH, canvas.height, S);
-      drawAnswers(ctx, await getBlocks(n), n, S);
+      if (canType) drawAnswers(ctx, await getBlocks(n), n, S);
 
       const blob = await new Promise((ok, no) =>
         canvas.toBlob(b => b ? ok(b) : no(new Error("page " + n + " image failed")), "image/png"));
@@ -1579,7 +1614,7 @@ $("bPrint").addEventListener("click", printReading);
 
 /* Ctrl+P / Cmd+P goes through the same path as the button */
 document.addEventListener("keydown", e => {
-  if (!worksheet || !$("shell").classList.contains("on")) return;
+  if (!canPrint || !$("shell").classList.contains("on")) return;
   if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "p" || e.key === "P")){
     e.preventDefault();
     printReading();
